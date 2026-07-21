@@ -1,38 +1,83 @@
 # Blink Camera AI Hub
 
-Blink Outdoor 카메라의 새 모션 클립을 5분마다 내려받아 사람·동물 중심으로 정리하는 로컬 프로그램입니다. 가까운 시간에 이어진 클립은 하나의 사건 영상으로 합치고, 야간 사람·여러 사람·반복 활동·큰 미분류 움직임을 이상징후로 표시합니다.
+**English** | [한국어](README.ko.md)
 
-> 이 프로젝트는 Amazon, Blink 또는 Immedia Semiconductor와 관계없는 비공식
-> 오픈소스 프로젝트입니다. 영상, Blink 인증정보와 Telegram 토큰은 로컬에만
-> 보관하며 Git 저장소에 올리지 마세요.
+Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor cameras and analyzes them locally with AI. It detects people, animals, and genuinely moving vehicles, joins related clips into event videos, and delivers the results through a local dashboard and Telegram.
 
-## 다른 M1 Mac에 설치
+> This is an unofficial open-source project and is not affiliated with Amazon, Blink, or Immedia Semiconductor. Keep camera footage, Blink credentials, and Telegram tokens local. Never commit them to Git.
 
-`Blink-Camera-AI-Hub-M1.zip`을 M1 Mac으로 복사해 압축을 푼 뒤 다음 파일을 순서대로 더블클릭합니다.
+## Features
 
-1. `M1-1-Install.command`
-2. `M1-2-Connect-Blink.command`
-3. 선택 사항: `M1-3-Connect-Telegram.command`
-4. `M1-4-Start.command`
+- Checks a Blink Sync Module for new clips every five minutes by default
+- Detects people, animals, and vehicles with YOLO
+- Combines detections across frames with motion and sharpness checks to reduce insect and parked-vehicle false positives
+- Merges only time-correlated clips from the same camera into an event
+- Flags people at night, multiple people, repeated activity, and large unknown motion as anomalies
+- Provides a local web dashboard and Telegram MP4 notifications
+- Stores metadata in SQLite and applies a 90-day default video-retention policy
+- Includes Apple Silicon launchers and a backend-only Docker configuration
 
-상세 로그는 `M1-5-View-Logs.command`로 볼 수 있습니다. Python 3.10~3.13(3.13 권장)이 필요하며, 첫 설치 때 Python 패키지와 Node 패키지를 인터넷에서 내려받습니다. ZIP에는 Blink·Telegram 인증정보와 기존 카메라 영상이 포함되지 않습니다.
+## Requirements
 
-## 처음 실행
+- macOS or Linux
+- Python 3.10–3.13 (3.13 recommended)
+- Node.js 22 or newer for the dashboard
+- Optional: Docker Desktop for the backend-only container
 
-macOS 또는 Linux 터미널에서 프로젝트 폴더로 이동한 뒤 실행합니다.
+## Quick start
 
 ```bash
+git clone https://github.com/knockknockyoo/blink-camera-ai-hub.git
+cd blink-camera-ai-hub
 bash scripts/setup.sh
 bash scripts/run.sh
 ```
 
-`bash scripts/run.sh` 한 번으로 백엔드와 화면이 모두 실행됩니다. 스크립트는 백엔드 상태 확인에 성공한 뒤 화면을 시작합니다. 브라우저에서 `http://localhost:3000`을 열면 먼저 데모 화면이 표시됩니다. 실행 중인 터미널을 닫거나 `Ctrl+C`를 누르면 둘 다 종료됩니다.
+The application starts with demo data until a Blink account is connected. Open `http://localhost:3000` for the dashboard. The backend API listens locally at `http://127.0.0.1:8787`.
 
-상세 다운로드·AI 분석 로그는 실행 터미널과 `data/logs/blink-camera-ai-hub.log`에 함께 기록됩니다. 다른 터미널에서 `tail -f data/logs/blink-camera-ai-hub.log`를 실행하거나 브라우저에서 `http://127.0.0.1:8787/api/logs`를 열어 확인할 수 있습니다.
+Detailed download and AI-analysis logs are written to the terminal and `data/logs/blink-camera-ai-hub.log`.
 
-## Docker로 백엔드만 실행
+```bash
+tail -f data/logs/blink-camera-ai-hub.log
+```
 
-화면 없이 Blink 확인, AI 분석, Telegram 발송만 실행하려면 Docker를 사용할 수 있습니다.
+## Connect a Blink account
+
+Run the following command on your own computer, then enter your Blink email address, password, and two-factor authentication code.
+
+```bash
+bash scripts/connect_blink.sh
+bash scripts/run.sh
+```
+
+Reusable authentication data is stored locally in `data/blink-auth.json`. This file and the entire `data/` directory are excluded from Git.
+
+## Telegram video notifications
+
+Create a bot with Telegram's `@BotFather`. Send `/start` in a private chat with the bot, or in a group to which the bot has been invited, then run:
+
+```bash
+bash scripts/connect_telegram.sh
+```
+
+The token is hidden while you type and is stored only in the local `.env` file. New person, animal, and anomaly event videos are then uploaded directly to Telegram. No public URL or router port forwarding is required.
+
+`TELEGRAM_PROTECT_CONTENT=true` limits forwarding and saving of Telegram messages by default. Existing events are skipped during the initial connection, and failed new notifications are retried on a later scan.
+
+## Apple Silicon Mac launchers
+
+When using a release ZIP, extract it and double-click these files in order:
+
+1. `M1-1-Install.command`
+2. `M1-2-Connect-Blink.command`
+3. Optional: `M1-3-Connect-Telegram.command`
+4. `M1-4-Start.command`
+
+Use `M1-5-View-Logs.command` to follow the detailed log. The first installation downloads Python and Node packages from the internet. A release archive must not include credentials or existing camera footage.
+
+## Run only the backend with Docker
+
+Use Docker when you want Blink scanning, AI analysis, and Telegram notifications without the dashboard:
 
 ```bash
 mkdir -p data models
@@ -41,56 +86,63 @@ docker compose up -d --build
 docker compose logs -f backend
 ```
 
-컨테이너는 비정상 종료 시 자동 재시작되며 `data/`와 `models/`는 M1에 계속 보존됩니다.
-90일이 지난 영상과 관련 DB 기록은 하루에 한 번 자동으로 정리됩니다. 자세한 내용은
-`DOCKER-M1.md`를 참고하세요.
+If no model is present, Ultralytics downloads it during the first analysis. The container restarts after an unexpected exit, while `data/` and `models/` remain on the host. Videos and related database records older than 90 days are cleaned once per day by default. See [DOCKER-M1.md](DOCKER-M1.md) for details.
 
-## Telegram 영상 알림
+## Test with existing videos
 
-Telegram의 `@BotFather`에서 Bot을 만든 뒤 Bot에게 `/start`를 보내고 아래 명령을 실행합니다.
+You can analyze an MP4 before connecting a Blink account. Place it under a camera-specific raw directory:
 
-```bash
-bash scripts/connect_telegram.sh
+```text
+data/raw/Outdoor/example.mp4
 ```
 
-토큰은 입력할 때 화면이나 셸 기록에 표시되지 않고 로컬 `.env`에만 저장됩니다. 실행 중인 백엔드가 있으면 설정이 즉시 적용되며, 꺼져 있으면 `bash scripts/run.sh`로 시작하세요. 이후 새 사람·동물·이상징후 이벤트의 MP4가 Telegram으로 직접 업로드됩니다. 공개 URL이나 공유기 포트 개방은 필요하지 않습니다. 기존 이벤트는 발송하지 않고, 실패한 새 이벤트는 다음 스캔에서 재시도합니다. 기본값인 `TELEGRAM_PROTECT_CONTENT=true`는 메시지 전달과 저장을 제한합니다.
+Then run `bash scripts/run.sh`. The default YOLO11n model is downloaded automatically during the first AI analysis.
 
-## Blink 계정 연결
+## How it works
 
-다음 명령을 실행한 뒤 본인 컴퓨터에서 Blink 이메일, 비밀번호, 2단계 인증번호를 입력합니다.
+1. BlinkPy checks for new clips every five minutes by default.
+2. The analyzer samples five frames per second by default.
+3. Object detections are correlated across frames and checked for box motion and sharpness.
+4. Related activity from the same camera is merged within a two-minute window by default.
+5. Unimportant source clips are preserved under `data/rejected/` rather than deleted.
+6. Event metadata is stored in SQLite and exposed to the dashboard and Telegram notifier.
+
+## Configuration
+
+The setup script copies `.env.example` to `.env`. The most important settings are:
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `SCAN_INTERVAL_SECONDS` | `300` | Interval between checks for new Blink clips |
+| `MERGE_WINDOW_SECONDS` | `120` | Time window for joining related clips |
+| `VIDEO_RETENTION_DAYS` | `90` | Retention period; `0` disables automatic deletion |
+| `MODEL_NAME` | `yolo11n.pt` | Ultralytics model name or local path |
+| `DETECTION_CONFIDENCE` | `0.15` | Minimum object-detection confidence |
+| `SAMPLE_FPS` | `5` | Number of video frames analyzed per second |
+| `CAMERA_TIMEZONE` | `Asia/Seoul` | Time zone used for camera capture times |
+| `KEEP_UNKNOWN_MOTION` | `false` | Whether to keep unclassified motion events |
+
+`PERSON_MIN_AREA` and `PERSON_MIN_BOX_MOTION` reject small, static person false positives. `VEHICLE_MIN_BOX_MOTION` and `VEHICLE_MIN_SHARPNESS` reduce false alerts from parked vehicles and out-of-focus insects. If distant real subjects are missed, lower these values gradually and test again.
+
+## Development and validation
 
 ```bash
-bash scripts/connect_blink.sh
-bash scripts/run.sh
+.venv/bin/python -m unittest tests.test_core
+npm test
+docker compose config -q
 ```
 
-인증정보는 `data/blink-auth.json`에 로컬로 저장되며 웹 브라우저로 전달되지 않습니다. 이 파일과 `data/` 폴더는 Git에서 제외됩니다.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Do not attach real camera footage, credentials, or identifying logs to an issue or pull request.
 
-## 기존 영상으로 먼저 시험하기
+## Limitations and security
 
-Blink 연결 전에 MP4 파일을 `data/raw/Outdoor/`에 복사한 뒤 `bash scripts/run.sh`를 실행해도 됩니다. 첫 AI 분석 시 오픈소스 YOLO11n 모델이 자동으로 내려받아집니다.
+- Blink does not provide a public official API. The unofficial BlinkPy integration can break when the Blink service changes.
+- Excessively short polling intervals can trigger Blink or Telegram rate limits.
+- The application can process only recorded motion clips; it cannot reconstruct periods that were never recorded.
+- General-purpose YOLO models are not perfect for every scene. Fine-tuning with representative false-positive samples provides the best accuracy improvement.
+- Treat `data/blink-auth.json` like a password and never expose API port 8787 to the internet.
+- Follow [SECURITY.md](SECURITY.md) when reporting a vulnerability or sharing logs, and redact all account, camera, network, and Sync Module identifiers.
 
-## 작동 방식
+## License
 
-1. BlinkPy로 5분마다 새 클립 확인
-2. 영상에서 초당 2개 프레임을 샘플링
-3. 여러 프레임에 지속해서 나타나고 실제 움직임이 확인되는 사람·동물·차량만 인정
-4. 2분 안에 연결된 활동을 하나의 사건으로 병합
-5. 중요하지 않은 원본은 삭제하지 않고 `data/rejected/`로 이동
-6. SQLite에 결과 저장 후 한국어 타임라인에 표시
-
-설정은 `.env`에서 바꿀 수 있습니다. 기본 검사 간격은 `SCAN_INTERVAL_SECONDS=300`, 사건 병합 간격은 `MERGE_WINDOW_SECONDS=120`입니다. 기본값은 사람·동물·이상징후만 타임라인에 남기며, 일반 움직임도 남기려면 `KEEP_UNKNOWN_MOTION=true`로 바꾸세요.
-
-작은 고정 물체의 사람 오인은 `PERSON_MIN_AREA`와 `PERSON_MIN_BOX_MOTION`으로 걸러냅니다. 멀리 있는 실제 사람을 놓치면 두 값을 조금 낮출 수 있습니다.
-
-## 주의사항
-
-- Blink는 공식 공개 API를 제공하지 않으므로 BlinkPy 연동은 Blink 변경에 따라 수정이 필요할 수 있습니다.
-- BlinkPy는 빠른 API 호출을 권장하지 않습니다. 기본 5분 간격을 과도하게 줄이지 마세요.
-- 실제로 촬영되지 않은 시간은 복원할 수 없습니다. 프로그램은 저장된 모션 클립만 연결합니다.
-- YOLO11n 기본 모델은 사람·개·고양이·새 등 일반 객체를 구분합니다. 곤충 오탐이 남으면 실제 오탐 샘플로 추가 학습하는 것이 가장 정확합니다.
-- Ultralytics 코드와 YOLO 모델은 AGPL-3.0 또는 별도의 Enterprise License로 제공됩니다. 이 프로젝트를 공개·배포하거나 상업적으로 사용하기 전에 해당 조건을 검토하세요.
-- 취약점이나 로그를 공개할 때는 `SECURITY.md`를 따르고 계정·카메라·네트워크 식별자를 모두 가리세요.
-
-서드파티 라이선스 안내는 `THIRD_PARTY_NOTICES.md`, 기여 방법은
-`CONTRIBUTING.md`를 참고하세요.
+Blink Camera AI Hub is released under the [GNU AGPL-3.0](LICENSE). Ultralytics code and YOLO model weights are offered under AGPL-3.0 or a separate Enterprise License. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for additional notices.
