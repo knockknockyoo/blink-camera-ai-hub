@@ -1,0 +1,64 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/.vinext/
+/out/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Local configuration and credentials. Keep the safe template public.
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+next-env.d.ts
+/dist/
+/.wrangler/
+/outputs/
+/work/
+# Blink Sentinel local data and credentials
+/data/
+/.venv/
+__pycache__/
+*.py[cod]
+*.pt
+
+# Local runtime files
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.pid
+*.bak
+
+# Local release bundles and working copies
+*.zip
+/BlinkSentinel-M1-*/
+/backend 2/
+/backend 3/
+/UPDATE-M1.txt

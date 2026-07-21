@@ -1,0 +1,26 @@
+name: blink-camera-ai-hub
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: blink-camera-ai-hub-backend
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      TZ: ${CAMERA_TIMEZONE:-Asia/Seoul}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    ports:
+      - "127.0.0.1:8787:8787"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
