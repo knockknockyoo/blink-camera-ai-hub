@@ -15,6 +15,8 @@ docker compose up -d
 
 Existing `data/blink-auth.json`, `data/sentinel.db`, videos, and `.env` settings are preserved. The AI model is downloaded to `models/` during the first analysis and reused afterward. If a model file already exists in the project directory, the `cp` command above avoids downloading it again.
 
+The downloader, AI analyzer, and Telegram retry notifier run as independent workers. A completed download is added to the durable `data/raw` queue immediately. Every five minutes by default, the AI worker processes the completed-video queue while downloads continue separately. Each relevant result is sent to Telegram immediately after its analysis finishes; failed deliveries remain queued across container restarts. Temporary `.part` files are never analyzed.
+
 ## Status and logs
 
 ```bash

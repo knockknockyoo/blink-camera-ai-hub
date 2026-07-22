@@ -143,6 +143,12 @@ class Database:
             ).fetchall()
         return [self._decode_event(row) for row in rows]
 
+    def find_event_for_clip(self, clip_id: int) -> dict[str, Any] | None:
+        for event in self.list_events(limit=5000):
+            if clip_id in event["clip_ids"]:
+                return event
+        return None
+
     def counts(self) -> dict[str, int]:
         with self.connect() as conn:
             row = conn.execute(
@@ -195,6 +201,18 @@ class Database:
                 "INSERT INTO state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def list_state(self, prefix: str) -> list[tuple[str, str]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM state WHERE key LIKE ? ORDER BY key",
+                (f"{prefix}%",),
+            ).fetchall()
+        return [(str(row["key"]), str(row["value"])) for row in rows]
+
+    def delete_state(self, key: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM state WHERE key = ?", (key,))
 
     @staticmethod
     def _decode_clip(row: sqlite3.Row) -> dict[str, Any]:

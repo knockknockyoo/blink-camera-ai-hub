@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 
 LOGGER = logging.getLogger("blink-camera-ai-hub")
@@ -20,7 +22,9 @@ class BlinkDownloader:
         download_delay_seconds: float = 5.0,
         retry_backoff_seconds: float = 5.0,
         clip_timeout_seconds: float = 90.0,
+        metadata_timeout_seconds: float = 120.0,
         max_clips_per_scan: int = 20,
+        progress_callback: Callable[..., None] | None = None,
     ):
         self.auth_file = auth_file
         self.download_dir = download_dir
@@ -29,8 +33,15 @@ class BlinkDownloader:
         self.download_delay_seconds = max(0.0, download_delay_seconds)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
         self.clip_timeout_seconds = max(1.0, clip_timeout_seconds)
+        self.metadata_timeout_seconds = max(1.0, metadata_timeout_seconds)
         self.max_clips_per_scan = max(0, max_clips_per_scan)
+        self.progress_callback = progress_callback
         self.incomplete_downloads = False
+        self.backlog_remaining = False
+
+    def _progress(self, **values: Any) -> None:
+        if self.progress_callback:
+            self.progress_callback(**values)
 
     @property
     def configured(self) -> bool:
@@ -39,6 +50,7 @@ class BlinkDownloader:
     async def _download_local_item(self, item, blink, destination: Path) -> bool:
         """Download one Sync Module clip without aborting the whole scan."""
         started_at = time.monotonic()
+        partial = destination.with_suffix(f"{destination.suffix}.part")
         for attempt in range(1, self.download_retries + 1):
             attempt_started_at = time.monotonic()
             try:
@@ -48,9 +60,11 @@ class BlinkDownloader:
                         raise RuntimeError(
                             "Blink did not respond to the download preparation command."
                         )
-                    await item.download_video(blink, str(destination))
-                    if not destination.exists() or destination.stat().st_size == 0:
+                    partial.unlink(missing_ok=True)
+                    await item.download_video(blink, str(partial))
+                    if not partial.exists() or partial.stat().st_size == 0:
                         raise RuntimeError("Blink returned an empty video file.")
+                    partial.replace(destination)
                 LOGGER.info(
                     "[Download complete] %s size=%d bytes elapsed=%.1fs",
                     destination.name,
@@ -67,6 +81,7 @@ class BlinkDownloader:
                 error = str(exc) or type(exc).__name__
 
             destination.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             attempt_elapsed = time.monotonic() - attempt_started_at
             if attempt >= self.download_retries:
                 LOGGER.error(
@@ -92,6 +107,39 @@ class BlinkDownloader:
             await asyncio.sleep(wait_seconds)
         return False
 
+    async def _metadata_stage(self, name: str, operation: Awaitable[Any]):
+        """Run one Blink metadata operation with visible progress and a timeout."""
+        self._progress(phase="metadata", file=name)
+        LOGGER.info("[Blink metadata] %s started", name)
+        started_at = time.monotonic()
+        try:
+            async with asyncio.timeout(self.metadata_timeout_seconds):
+                result = await operation
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Blink metadata stage '{name}' exceeded "
+                f"{self.metadata_timeout_seconds:g} seconds."
+            ) from exc
+        LOGGER.info(
+            "[Blink metadata] %s complete in %.1fs",
+            name,
+            time.monotonic() - started_at,
+        )
+        return result
+
+    def _publish_cloud_downloads(self, staging_dir: Path) -> int:
+        """Atomically publish completed cloud clips from outside the AI queue."""
+        published = 0
+        for source in staging_dir.rglob("*.mp4"):
+            destination = self.download_dir / source.relative_to(staging_dir)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                source.unlink()
+                continue
+            source.replace(destination)
+            published += 1
+        return published
+
     def _prioritize_local_items(self, local_items):
         """Prefer recent clips and bound one scan so alerts cannot trail a backlog."""
         ordered = sorted(
@@ -106,6 +154,7 @@ class BlinkDownloader:
 
     async def download_new(self, since: datetime | None = None) -> int:
         self.incomplete_downloads = False
+        self.backlog_remaining = False
         if not self.configured:
             return 0
         try:
@@ -126,7 +175,11 @@ class BlinkDownloader:
                 no_prompt=True,
                 session=session,
             )
-            await blink.start()
+            started = await self._metadata_stage(
+                "authentication and setup", blink.start()
+            )
+            if not started:
+                raise RuntimeError("Blink authentication or platform setup failed.")
             # Refresh populates each camera's recent_clips from both cloud and
             # Sync Module local-storage manifests. This is the important path
             # for free accounts using USB/microSD storage.
@@ -135,7 +188,9 @@ class BlinkDownloader:
                 local_state = getattr(sync_module, "_local_storage", None)
                 if isinstance(local_state, dict) and local_state.get("status"):
                     local_state["last_manifest_read"] = local_since
-            await blink.refresh(force=True)
+            await self._metadata_stage(
+                "homescreen and Sync Module refresh", blink.refresh(force=True)
+            )
             # Sync Modules occasionally return code 2102 while rebuilding a
             # larger manifest. Retry that manifest without redoing login.
             for sync_module in blink.sync.values():
@@ -146,7 +201,10 @@ class BlinkDownloader:
                     if not local_state.get("manifest_stale"):
                         break
                     await asyncio.sleep(3 * (retry + 1))
-                    await sync_module.update_local_storage_manifest()
+                    await self._metadata_stage(
+                        f"Sync Module manifest retry {retry + 1}",
+                        sync_module.update_local_storage_manifest(),
+                    )
             selected = None if self.camera.lower() == "all" else self.camera.lower()
 
             # BlinkPy's camera.recent_clips intentionally expires items older
@@ -185,10 +243,14 @@ class BlinkDownloader:
 
             discovered_count = len(local_items)
             local_items, deferred_count = self._prioritize_local_items(local_items)
+            self.backlog_remaining = deferred_count > 0
             LOGGER.info(
                 "[Download] Found %d new Sync Module clips; processing newest %d",
                 discovered_count,
                 len(local_items),
+            )
+            self._progress(
+                phase="downloading", current=0, total=len(local_items), file=None
             )
             if deferred_count:
                 self.incomplete_downloads = True
@@ -198,6 +260,7 @@ class BlinkDownloader:
                 )
             failed_downloads = 0
             for index, (item, destination) in enumerate(local_items, start=1):
+                self._progress(current=index, file=destination.name)
                 LOGGER.info(
                     "[Download %d/%d] camera=%s file=%s",
                     index,
@@ -219,17 +282,31 @@ class BlinkDownloader:
             # Cloud-backed accounts can expose more than the recent-clip window.
             # Downloading again is harmless because BlinkPy skips existing names.
             if not deferred_count:
+                cloud_staging = self.download_dir.parent / ".cloud-download-staging"
+                shutil.rmtree(cloud_staging, ignore_errors=True)
+                cloud_staging.mkdir(parents=True, exist_ok=True)
                 try:
                     await blink.download_videos(
-                        str(self.download_dir),
+                        str(cloud_staging),
                         since=since.astimezone().strftime("%Y/%m/%d %H:%M"),
                         camera=self.camera,
                         delay=self.download_delay_seconds,
                     )
+                    published = self._publish_cloud_downloads(cloud_staging)
+                    if published:
+                        LOGGER.info(
+                            "[Cloud download] Published %d completed clips to the AI queue",
+                            published,
+                        )
                 except Exception as exc:
                     # Local-storage clips already downloaded above must still be
                     # analyzed even when Blink throttles the optional cloud pass.
-                    LOGGER.warning("[Cloud download] Failed, but analysis will continue: %s", exc)
+                    LOGGER.warning(
+                        "[Cloud download] Failed, but analysis will continue: %s",
+                        exc,
+                    )
+                finally:
+                    shutil.rmtree(cloud_staging, ignore_errors=True)
             else:
                 LOGGER.info(
                     "[Cloud download] Skipped because deferred Sync Module clips remain"

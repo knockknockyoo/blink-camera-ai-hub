@@ -19,8 +19,10 @@ from backend.analyzer import (
 )
 from backend.db import Database
 from backend.blink_client import BlinkDownloader
+from backend.config import Settings
 from backend.events import build_event, clips_are_related, merge_clips, should_keep
 from backend.retention import delete_expired_videos
+from backend.service import MonitorService
 from backend.telegram import TelegramNotifier
 
 
@@ -97,6 +99,171 @@ class CoreTests(unittest.TestCase):
 
             self.assertFalse(downloaded)
             self.assertFalse(destination.exists())
+
+    def test_completed_download_is_published_atomically(self):
+        class Item:
+            async def prepare_download(self, _blink):
+                return True
+
+            async def download_video(self, _blink, destination):
+                self.destination = Path(destination)
+                self.destination.write_bytes(b"video")
+                self.final_was_visible_during_download = Path(
+                    str(self.destination).removesuffix(".part")
+                ).exists()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloader = BlinkDownloader(root / "auth.json", root / "raw")
+            item = Item()
+            destination = root / "raw" / "clip.mp4"
+            destination.parent.mkdir(parents=True)
+
+            downloaded = asyncio.run(
+                downloader._download_local_item(item, object(), destination)
+            )
+
+            self.assertTrue(downloaded)
+            self.assertFalse(item.final_was_visible_during_download)
+            self.assertEqual(destination.read_bytes(), b"video")
+            self.assertFalse(destination.with_suffix(".mp4.part").exists())
+
+    def test_blink_metadata_stage_times_out(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                downloader = BlinkDownloader(
+                    root / "auth.json",
+                    root / "raw",
+                    metadata_timeout_seconds=0.01,
+                )
+                with self.assertRaisesRegex(RuntimeError, "metadata stage"):
+                    await downloader._metadata_stage(
+                        "test operation", asyncio.Event().wait()
+                    )
+
+        asyncio.run(run())
+
+    def test_cloud_downloads_are_published_from_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw"
+            staging = root / ".cloud-download-staging"
+            staged_clip = staging / "Outdoor" / "clip.mp4"
+            staged_clip.parent.mkdir(parents=True)
+            staged_clip.write_bytes(b"video")
+            downloader = BlinkDownloader(root / "auth.json", raw)
+
+            published = downloader._publish_cloud_downloads(staging)
+
+            self.assertEqual(published, 1)
+            self.assertEqual((raw / "Outdoor" / "clip.mp4").read_bytes(), b"video")
+            self.assertFalse(staged_clip.exists())
+
+    def test_ai_analysis_can_run_while_downloader_is_active(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="",
+                        telegram_chat_id="",
+                    )
+                )
+                clip_ready = asyncio.Event()
+                release_download = asyncio.Event()
+                raw_clip = root / "raw" / "1" / "20260722_120000_1.mp4"
+
+                class Downloader:
+                    configured = True
+                    incomplete_downloads = False
+
+                    async def download_new(self, _since):
+                        raw_clip.parent.mkdir(parents=True, exist_ok=True)
+                        raw_clip.write_bytes(b"video")
+                        clip_ready.set()
+                        await release_download.wait()
+                        return 1
+
+                class Analyzer:
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 1,
+                            "labels": {"person": 1},
+                            "score": 0.9,
+                            "motion_score": 0.2,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                service.downloader = Downloader()
+                service.analyzer = Analyzer()
+                download_task = asyncio.create_task(service.download_once())
+                await clip_ready.wait()
+
+                analyzed = await service.analyze_pending()
+
+                self.assertEqual(analyzed, 1)
+                self.assertTrue(service._download_lock.locked())
+                self.assertTrue(service.db.clip_exists(raw_clip.resolve()))
+                release_download.set()
+                self.assertEqual(await download_task, 1)
+
+        asyncio.run(run())
+
+    def test_ai_analysis_sends_relevant_result_to_telegram_immediately(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                raw_clip = root / "raw" / "1" / "20260722_120000_1.mp4"
+                raw_clip.parent.mkdir(parents=True)
+                raw_clip.write_bytes(b"video")
+                delivered = []
+
+                class Analyzer:
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 1,
+                            "labels": {"person": 1},
+                            "score": 0.9,
+                            "motion_score": 0.2,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(event)
+                        return True
+
+                async def skip_event_rebuild():
+                    return None
+
+                service.analyzer = Analyzer()
+                service.telegram = Telegram()
+                service._finalize_dirty_events = skip_event_rebuild
+
+                analyzed = await service.analyze_pending()
+
+                self.assertEqual(analyzed, 1)
+                self.assertEqual(len(delivered), 1)
+                self.assertEqual(delivered[0]["kind"], "person")
+                self.assertEqual(delivered[0]["video_path"], str(raw_clip.resolve()))
+                self.assertEqual(service.db.list_state("telegram:clip-pending:"), [])
+
+        asyncio.run(run())
 
     def test_blink_backlog_prioritizes_newest_and_defers_the_rest(self):
         now = datetime.now(timezone.utc)
@@ -252,6 +419,206 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(clip_id, 1)
             stored = db.recent_clips("Outdoor")
             self.assertEqual(stored[0]["labels"], {"dog": 1})
+
+    def test_database_state_prefix_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "test.db")
+            db.set_state("telegram:clip-pending:2", "two")
+            db.set_state("telegram:clip-pending:1", "one")
+            db.set_state("unrelated", "value")
+
+            self.assertEqual(
+                db.list_state("telegram:clip-pending:"),
+                [
+                    ("telegram:clip-pending:1", "one"),
+                    ("telegram:clip-pending:2", "two"),
+                ],
+            )
+            db.delete_state("telegram:clip-pending:1")
+            self.assertEqual(
+                db.list_state("telegram:clip-pending:"),
+                [("telegram:clip-pending:2", "two")],
+            )
+
+    def test_relevant_clip_is_queued_and_sent_without_event_merge(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                video = root / "raw" / "1" / "clip.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                item = clip(7, datetime.now(timezone.utc), {"motorcycle": 1})
+                item["path"] = str(video)
+                item["camera"] = "1"
+                service._queue_clip_notification(item)
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(event)
+                        return True
+
+                service.telegram = Telegram()
+                sent = await service._send_pending_notifications()
+
+                self.assertEqual(sent, 1)
+                self.assertEqual(delivered[0]["kind"], "vehicle")
+                self.assertEqual(delivered[0]["video_path"], str(video))
+                self.assertEqual(
+                    service.db.list_state("telegram:clip-pending:"), []
+                )
+                self.assertIsNotNone(service.db.get_state("telegram:clip-sent:7"))
+
+        asyncio.run(run())
+
+    def test_related_clips_send_one_merged_video_when_already_available(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                now = datetime.now(timezone.utc)
+                first_video = root / "raw" / "1" / "first.mp4"
+                second_video = root / "raw" / "1" / "second.mp4"
+                merged_video = root / "events" / "1" / "merged.mp4"
+                for video in (first_video, second_video, merged_video):
+                    video.parent.mkdir(parents=True, exist_ok=True)
+                    video.write_bytes(b"video")
+                first = clip(1, now, {"person": 1})
+                second = clip(2, now + timedelta(seconds=30), {"person": 1})
+                first.update(path=str(first_video), camera="1")
+                second.update(path=str(second_video), camera="1")
+                service._queue_clip_notification(first)
+                service._queue_clip_notification(second)
+                service.db.replace_events(
+                    "1",
+                    [
+                        {
+                            "started_at": first["captured_at"],
+                            "ended_at": second["captured_at"],
+                            "kind": "person",
+                            "score": 0.9,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                            "labels": {"person": 2},
+                            "clip_ids": [1, 2],
+                            "video_path": str(merged_video),
+                        }
+                    ],
+                )
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(event)
+                        return True
+
+                service.telegram = Telegram()
+                sent = await service._send_pending_notifications()
+
+                self.assertEqual(sent, 1)
+                self.assertEqual(len(delivered), 1)
+                self.assertEqual(delivered[0]["video_path"], str(merged_video))
+                self.assertEqual(
+                    service.db.list_state("telegram:clip-pending:"), []
+                )
+
+        asyncio.run(run())
+
+    def test_telegram_queue_sends_oldest_clip_first(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                now = datetime.now(timezone.utc)
+                newer = clip(1, now, {"person": 1})
+                older = clip(2, now - timedelta(hours=1), {"person": 1})
+                for item, name in ((newer, "newer.mp4"), (older, "older.mp4")):
+                    video = root / "raw" / "1" / name
+                    video.parent.mkdir(parents=True, exist_ok=True)
+                    video.write_bytes(b"video")
+                    item.update(path=str(video), camera="1")
+                    service._queue_clip_notification(item)
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(Path(event["video_path"]).name)
+                        return True
+
+                service.telegram = Telegram()
+                sent = await service._send_pending_notifications()
+
+                self.assertEqual(sent, 2)
+                self.assertEqual(delivered, ["older.mp4", "newer.mp4"])
+
+        asyncio.run(run())
+
+    def test_telegram_queue_sends_while_download_backlog_remains(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                video = root / "raw" / "1" / "clip.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                item = clip(1, datetime.now(timezone.utc), {"person": 1})
+                item.update(path=str(video), camera="1")
+                service._queue_clip_notification(item)
+                service.downloader.backlog_remaining = True
+
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(event)
+                        return True
+
+                service.telegram = Telegram()
+
+                sent = await service._send_pending_notifications()
+
+                self.assertEqual(sent, 1)
+                self.assertEqual(len(delivered), 1)
+                self.assertEqual(service.db.list_state("telegram:clip-pending:"), [])
+
+        asyncio.run(run())
 
     def test_retention_deletes_only_expired_videos_and_rows(self):
         with tempfile.TemporaryDirectory() as directory:

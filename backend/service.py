@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -59,6 +60,7 @@ class MonitorService:
             download_retries=settings.blink_download_retries,
             download_delay_seconds=settings.blink_download_delay_seconds,
             clip_timeout_seconds=settings.blink_clip_timeout_seconds,
+            metadata_timeout_seconds=settings.blink_metadata_timeout_seconds,
             max_clips_per_scan=settings.blink_max_clips_per_scan,
         )
         self.analyzer = VideoAnalyzer(
@@ -78,74 +80,202 @@ class MonitorService:
             settings.telegram_protect_content,
         )
         self._initialize_telegram_history()
-        self._lock = asyncio.Lock()
+        self._download_lock = asyncio.Lock()
+        self._analysis_lock = asyncio.Lock()
+        self._notification_lock = asyncio.Lock()
         self._running = False
-        self._task: asyncio.Task[None] | None = None
+        self._tasks: list[asyncio.Task[None]] = []
+        self._dirty_cameras: set[str] = set()
+        self.last_download_error: str | None = None
+        self.last_analysis_error: str | None = None
         self.last_error: str | None = None
-        self.progress: dict[str, Any] = {
+        self.download_progress: dict[str, Any] = {
             "phase": "idle",
             "current": 0,
             "total": 0,
             "file": None,
         }
+        self.analysis_progress: dict[str, Any] = dict(self.download_progress)
+        self.notification_progress: dict[str, Any] = dict(self.download_progress)
+        self.downloader.progress_callback = self._update_download_progress
+
+    def _update_download_progress(self, **values: Any) -> None:
+        self.download_progress.update(values)
 
     async def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._loop(), name="blink-monitor")
+        if self._tasks:
+            return
+        self._running = True
+        self._tasks = [
+            asyncio.create_task(self._download_loop(), name="blink-downloader"),
+            asyncio.create_task(self._analysis_loop(), name="video-analyzer"),
+            asyncio.create_task(self._notification_loop(), name="telegram-notifier"),
+        ]
+        LOGGER.info(
+            "[Workers] Independent downloader, analyzer, and Telegram notifier started"
+        )
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = []
 
-    async def _loop(self) -> None:
-        self._running = True
+    def _sync_last_error(self) -> None:
+        self.last_error = self.last_download_error or self.last_analysis_error
+
+    async def _download_loop(self) -> None:
+        while self._running:
+            started_at = time.monotonic()
+            delay = float(self.settings.scan_interval_seconds)
+            failed = False
+            try:
+                await self.download_once()
+                self.last_download_error = None
+                if self.downloader.incomplete_downloads:
+                    delay = max(1.0, self.settings.blink_backlog_retry_seconds)
+            except Exception as exc:  # Recoverable Blink/network failure.
+                failed = True
+                self.last_download_error = str(exc)
+                self.download_progress.update(phase="error", file=str(exc))
+                delay = min(60.0, float(self.settings.scan_interval_seconds))
+                LOGGER.exception("download scan failed")
+            self._sync_last_error()
+            elapsed = time.monotonic() - started_at
+            if not failed and not self.downloader.incomplete_downloads:
+                delay = max(1.0, delay - elapsed)
+            LOGGER.info(
+                "[Next download scan] Starting in %.0fs (current scan %.1fs, backlog=%s)",
+                delay,
+                elapsed,
+                self.downloader.incomplete_downloads,
+            )
+            await asyncio.sleep(delay)
+
+    async def _analysis_loop(self) -> None:
+        delay = max(1.0, float(self.settings.analysis_interval_seconds))
+        LOGGER.info("[Next AI analysis] Starting in %.0fs", delay)
+        await asyncio.sleep(delay)
         while self._running:
             started_at = time.monotonic()
             try:
-                await self.scan()
-            except Exception as exc:  # Keep the scheduler alive after recoverable Blink/network errors.
-                self.last_error = str(exc)
-                self.progress.update(phase="error", file=str(exc))
-                LOGGER.exception("scan failed")
+                await self.analyze_pending()
+                self.last_analysis_error = None
+                self._sync_last_error()
+            except Exception as exc:  # A bad clip must not stop future analysis.
+                self.last_analysis_error = str(exc)
+                self.analysis_progress.update(phase="error", file=str(exc))
+                self._sync_last_error()
+                LOGGER.exception("AI analysis worker failed")
             elapsed = time.monotonic() - started_at
-            delay = max(1.0, self.settings.scan_interval_seconds - elapsed)
+            delay = max(
+                1.0, float(self.settings.analysis_interval_seconds) - elapsed
+            )
             LOGGER.info(
-                "[Next scan] Starting in %.0fs (current scan %.1fs)",
+                "[Next AI analysis] Starting in %.0fs (current analysis %.1fs)",
                 delay,
                 elapsed,
             )
             await asyncio.sleep(delay)
 
-    async def scan(self, since_override: datetime | None = None) -> dict[str, int]:
-        if self._lock.locked():
-            return {"downloaded": 0, "analyzed": 0, "events": 0}
-        async with self._lock:
-            LOGGER.info("[Scan started]")
+    async def _notification_loop(self) -> None:
+        while self._running:
+            await self._send_pending_notifications()
+            await asyncio.sleep(5)
+
+    async def _send_pending_notifications(self) -> int:
+        if self._notification_lock.locked():
+            return 0
+        async with self._notification_lock:
+            pending: list[tuple[str, dict[str, Any]]] = []
+            for key, value in self.db.list_state("telegram:clip-pending:"):
+                try:
+                    pending.append((key, json.loads(value)))
+                except json.JSONDecodeError:
+                    LOGGER.error(
+                        "[Telegram] Removing invalid pending notification: %s", key
+                    )
+                    self.db.delete_state(key)
+            pending.sort(key=lambda item: item[1]["event"]["started_at"])
+
+            sent = 0
+            for key, payload in pending:
+                clip_id = int(payload["clip_id"])
+                event = self.db.find_event_for_clip(clip_id) or payload["event"]
+                event_key = self._telegram_key(event)
+                if self.db.get_state(event_key):
+                    self.db.delete_state(key)
+                    continue
+                self.notification_progress.update(
+                    phase="notifying", file=event.get("video_path")
+                )
+                LOGGER.info(
+                    "[Telegram] Sending analyzed clip immediately: camera=%s kind=%s file=%s",
+                    event["camera"],
+                    event["kind"],
+                    Path(event["video_path"]).name,
+                )
+                if not await self.telegram.send_event(event):
+                    break
+                self.db.delete_state(key)
+                sent_at = datetime.now(timezone.utc).isoformat()
+                self.db.set_state(f"telegram:clip-sent:{clip_id}", sent_at)
+                self.db.set_state(event_key, sent_at)
+                sent += 1
+            self.notification_progress.update(phase="idle", file=None)
+            return sent
+
+    async def download_once(self, since_override: datetime | None = None) -> int:
+        if self._download_lock.locked():
+            return 0
+        async with self._download_lock:
+            LOGGER.info("[Download scan started]")
             await self.cleanup_expired_media()
             downloaded = 0
             if self.downloader.configured and not self.settings.demo_mode:
                 last = self.db.get_state("last_scan")
                 since = since_override or (datetime.fromisoformat(last) if last else None)
-                self.progress.update(phase="downloading", current=0, total=0, file=None)
+                self.download_progress.update(
+                    phase="downloading", current=0, total=0, file=None
+                )
                 downloaded = await self.downloader.download_new(since)
 
-            analyzed = 0
-            cameras: set[str] = set()
+            now = datetime.now(timezone.utc).isoformat()
+            if self.downloader.incomplete_downloads:
+                LOGGER.warning(
+                    "[Download scan] Keeping last_scan unchanged so deferred or failed clips can be retried"
+                )
+            else:
+                self.db.set_state("last_scan", now)
+            self.download_progress.update(phase="idle", current=0, total=0, file=None)
+            LOGGER.info("[Download scan complete] downloaded=%d", downloaded)
+            return downloaded
+
+    async def analyze_pending(self) -> int:
+        if self._analysis_lock.locked():
+            return 0
+        async with self._analysis_lock:
             pending = [
                 path
                 for path in sorted(self.settings.raw_dir.rglob("*.mp4"))
-                if not self.db.clip_exists(path)
+                if not self.db.clip_exists(path.resolve())
             ]
-            LOGGER.info("[AI analysis] %d clips pending", len(pending))
-            self.progress.update(phase="analyzing", current=0, total=len(pending), file=None)
+            if pending:
+                LOGGER.info("[AI queue] %d completed downloads pending", len(pending))
+            self.analysis_progress.update(
+                phase="analyzing" if pending else "idle",
+                current=0,
+                total=len(pending),
+                file=None,
+            )
+            analyzed = 0
             for index, path in enumerate(pending, start=1):
-                self.progress.update(current=index, file=path.name)
-                LOGGER.info("[AI analysis %d/%d] Started: %s", index, len(pending), path.name)
+                self.analysis_progress.update(current=index, file=path.name)
+                LOGGER.info(
+                    "[AI analysis %d/%d] Started: %s", index, len(pending), path.name
+                )
                 camera, captured_at = infer_metadata(path)
                 result = await asyncio.to_thread(self.analyzer.analyze, path, captured_at)
                 result.update(
@@ -155,8 +285,9 @@ class MonitorService:
                         "captured_at": captured_at.isoformat(),
                     }
                 )
-                self.db.add_clip(result)
-                cameras.add(camera)
+                clip_id = self.db.add_clip(result)
+                result["id"] = clip_id
+                self._dirty_cameras.add(camera)
                 analyzed += 1
                 LOGGER.info(
                     "[AI analysis %d/%d] Complete: labels=%s score=%.3f motion=%.4f anomaly=%s",
@@ -167,31 +298,61 @@ class MonitorService:
                     result.get("motion_score", 0),
                     result.get("anomaly", False),
                 )
+                self._queue_clip_notification(result)
+                await self._send_pending_notifications()
 
-            for camera in cameras:
-                self.progress.update(phase="events", current=0, total=len(cameras), file=camera)
-                LOGGER.info("[Event creation] camera=%s", camera)
-                await asyncio.to_thread(self.rebuild_events, camera)
-
-            await self.notify_telegram(self.db.list_events(limit=500))
-
-            now = datetime.now(timezone.utc).isoformat()
-            if self.downloader.incomplete_downloads:
-                LOGGER.warning(
-                    "[Scan] Keeping last_scan unchanged so failed clips can be retried"
-                )
-            else:
-                self.db.set_state("last_scan", now)
-            self.last_error = None
-            event_count = len(self.db.list_events())
-            self.progress.update(phase="idle", current=0, total=0, file=None)
-            LOGGER.info(
-                "[Scan complete] downloaded=%d analyzed=%d events=%d",
-                downloaded,
-                analyzed,
-                event_count,
+            still_pending = any(
+                not self.db.clip_exists(path.resolve())
+                for path in self.settings.raw_dir.rglob("*.mp4")
             )
-            return {"downloaded": downloaded, "analyzed": analyzed, "events": event_count}
+            if (
+                self._dirty_cameras
+                and not still_pending
+                and not self._download_lock.locked()
+            ):
+                await self._finalize_dirty_events()
+            self.analysis_progress.update(phase="idle", current=0, total=0, file=None)
+            return analyzed
+
+    async def _finalize_dirty_events(self) -> None:
+        cameras = sorted(self._dirty_cameras)
+        for camera in cameras:
+            LOGGER.info("[Event creation] camera=%s", camera)
+            await asyncio.to_thread(self.rebuild_events, camera)
+            self._dirty_cameras.discard(camera)
+
+    def _queue_clip_notification(self, clip: dict[str, Any]) -> None:
+        if not self.telegram.configured:
+            return
+        event = build_event([clip])
+        if not should_keep(event, self.settings.keep_unknown_motion):
+            return
+        event.pop("source_paths", None)
+        event["camera"] = clip["camera"]
+        event["video_path"] = clip["path"]
+        key = f"telegram:clip-pending:{clip['id']}"
+        payload = {
+            "clip_id": clip["id"],
+            "event": event,
+        }
+        self.db.set_state(key, json.dumps(payload, ensure_ascii=False))
+        LOGGER.info(
+            "[Telegram queue] Added analyzed clip for immediate delivery: id=%s kind=%s file=%s",
+            clip["id"],
+            event["kind"],
+            Path(clip["path"]).name,
+        )
+
+    async def scan(self, since_override: datetime | None = None) -> dict[str, int]:
+        """Trigger a download scan; the independent AI worker consumes its queue."""
+        if self._download_lock.locked():
+            return {"downloaded": 0, "analyzed": 0, "events": 0}
+        downloaded = await self.download_once(since_override)
+        return {
+            "downloaded": downloaded,
+            "analyzed": 0,
+            "events": len(self.db.list_events()),
+        }
 
     async def cleanup_expired_media(self) -> None:
         """Remove expired videos and metadata at most once per day."""
@@ -294,7 +455,9 @@ class MonitorService:
             notification_key = self._telegram_key(event)
             if self.db.get_state(notification_key):
                 continue
-            self.progress.update(phase="notifying", file=event.get("video_path"))
+            self.notification_progress.update(
+                phase="notifying", file=event.get("video_path")
+            )
             LOGGER.info(
                 "[Telegram] Sending: camera=%s kind=%s started=%s",
                 event["camera"],
@@ -354,13 +517,34 @@ class MonitorService:
             self.db.update_clip_path(clip["id"], destination.resolve())
 
     def status(self) -> dict[str, Any]:
+        downloading = self._download_lock.locked()
+        analyzing = (
+            self._analysis_lock.locked()
+            and self.analysis_progress["phase"] != "idle"
+        )
+        notifying = self.notification_progress["phase"] == "notifying"
+        progress = (
+            self.analysis_progress
+            if analyzing
+            else self.notification_progress
+            if notifying
+            else self.download_progress
+        )
         return {
             "configured": self.downloader.configured,
-            "scanning": self._lock.locked(),
+            "scanning": downloading,
+            "analyzing": analyzing,
+            "notifying": notifying,
             "interval_seconds": self.settings.scan_interval_seconds,
+            "analysis_interval_seconds": self.settings.analysis_interval_seconds,
             "last_scan": self.db.get_state("last_scan"),
             "last_error": self.last_error,
-            "progress": self.progress,
+            "progress": progress,
+            "workers": {
+                "downloader": self.download_progress,
+                "analyzer": self.analysis_progress,
+                "notifier": self.notification_progress,
+            },
             "telegram_configured": self.telegram.configured,
             "counts": self.db.counts(),
         }

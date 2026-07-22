@@ -22,16 +22,25 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     data_dir: Path = Path(os.getenv("DATA_DIR", ROOT / "data"))
     scan_interval_seconds: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+    analysis_interval_seconds: int = int(
+        os.getenv("ANALYSIS_INTERVAL_SECONDS", "300")
+    )
     merge_window_seconds: int = int(os.getenv("MERGE_WINDOW_SECONDS", "120"))
     video_retention_days: int = int(os.getenv("VIDEO_RETENTION_DAYS", "90"))
     camera_filter: str = os.getenv("BLINK_CAMERA", "all")
     blink_clip_timeout_seconds: float = float(
         os.getenv("BLINK_CLIP_TIMEOUT_SECONDS", "90")
     )
+    blink_metadata_timeout_seconds: float = float(
+        os.getenv("BLINK_METADATA_TIMEOUT_SECONDS", "120")
+    )
     blink_download_retries: int = int(os.getenv("BLINK_DOWNLOAD_RETRIES", "1"))
     blink_max_clips_per_scan: int = int(os.getenv("BLINK_MAX_CLIPS_PER_SCAN", "20"))
     blink_download_delay_seconds: float = float(
         os.getenv("BLINK_DOWNLOAD_DELAY_SECONDS", "5")
+    )
+    blink_backlog_retry_seconds: float = float(
+        os.getenv("BLINK_BACKLOG_RETRY_SECONDS", "15")
     )
     model_name: str = os.getenv("MODEL_NAME", "yolo11n.pt")
     confidence: float = float(os.getenv("DETECTION_CONFIDENCE", "0.15"))
