@@ -2,17 +2,17 @@
 
 [English](README.md) | **한국어**
 
-Blink Outdoor 카메라의 새 모션 클립을 주기적으로 내려받아 로컬 AI로 분석하는 프로그램입니다. 사람·동물·실제로 움직이는 차량을 감지하고, 가까운 시간에 이어진 관련 클립을 하나의 사건 영상으로 합친 뒤 대시보드와 Telegram으로 알려줍니다.
+Blink Outdoor 카메라의 새 모션 클립을 주기적으로 내려받아 로컬 AI로 분석하는 프로그램입니다. 사람과 실제로 움직이는 차량을 감지하고, 가까운 시간에 이어진 관련 클립을 하나의 사건 영상으로 합친 뒤 대시보드와 Telegram으로 알려줍니다.
 
 > 이 프로젝트는 Amazon, Blink 또는 Immedia Semiconductor와 관계없는 비공식 오픈소스 프로젝트입니다. 카메라 영상, Blink 인증정보와 Telegram 토큰은 로컬에만 보관하고 Git 저장소에 올리지 마세요.
 
 ## 주요 기능
 
 - 기본 5분 간격으로 Blink Sync Module의 새 클립 확인
-- YOLO 기반 사람·동물·차량 감지
+- YOLO 기반 사람·이동 차량 감지, 동물 검출은 제외
 - 여러 프레임의 검출과 실제 움직임을 함께 확인해 벌레·주차 차량 오탐 감소
 - 시간과 카메라가 연관된 클립만 하나의 사건으로 병합
-- 야간 사람, 여러 사람, 반복 활동과 큰 미분류 움직임을 이상징후로 표시
+- 야간 사람, 여러 사람과 반복된 대상 활동을 이상징후로 표시
 - 로컬 웹 대시보드와 Telegram MP4 알림
 - SQLite 기록과 90일 기본 영상 보관 정책
 - Apple Silicon Mac용 실행 파일과 백엔드 전용 Docker 구성
@@ -60,7 +60,7 @@ Telegram의 `@BotFather`에서 Bot을 만들고, Bot과의 개인 대화 또는 
 bash scripts/connect_telegram.sh
 ```
 
-토큰은 화면이나 셸 기록에 표시되지 않고 로컬 `.env`에만 저장됩니다. 이후 새 사람·동물·이상징후 이벤트의 MP4가 Telegram으로 직접 업로드됩니다. 공개 URL이나 공유기 포트 개방은 필요하지 않습니다.
+토큰은 화면이나 셸 기록에 표시되지 않고 로컬 `.env`에만 저장됩니다. 이후 새 사람·이동 차량·이상징후 이벤트의 MP4가 Telegram으로 직접 업로드됩니다. 공개 URL이나 공유기 포트 개방은 필요하지 않습니다.
 
 기본값인 `TELEGRAM_PROTECT_CONTENT=true`는 Telegram 메시지의 전달과 저장을 제한합니다. 기존 이벤트는 처음 연결할 때 발송하지 않으며, 실패한 새 이벤트는 다음 스캔에서 다시 시도합니다.
 
@@ -114,6 +114,10 @@ data/raw/Outdoor/example.mp4
 | 변수 | 기본값 | 설명 |
 | --- | ---: | --- |
 | `SCAN_INTERVAL_SECONDS` | `300` | 새 Blink 클립 확인 간격 |
+| `BLINK_CLIP_TIMEOUT_SECONDS` | `90` | Sync Module 영상 하나가 스캔을 막을 수 있는 최대 시간 |
+| `BLINK_DOWNLOAD_RETRIES` | `1` | 한 스캔의 영상별 시도 횟수, 실패하면 다음 스캔에서 재시도 |
+| `BLINK_MAX_CLIPS_PER_SCAN` | `20` | 최신 영상부터 한 번에 처리할 최대 개수, `0`은 제한 없음 |
+| `BLINK_DOWNLOAD_DELAY_SECONDS` | `5` | Blink 요청 제한을 줄이기 위한 영상 사이 대기시간 |
 | `MERGE_WINDOW_SECONDS` | `120` | 관련 클립을 하나의 사건으로 묶는 시간 범위 |
 | `VIDEO_RETENTION_DAYS` | `90` | 영상과 관련 기록 보관 기간, `0`은 자동 삭제 안 함 |
 | `MODEL_NAME` | `yolo11n.pt` | Ultralytics 모델 이름 또는 로컬 경로 |

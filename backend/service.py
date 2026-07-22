@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,15 @@ class MonitorService:
         configure_logging(settings.data_dir)
         self.settings = settings
         self.db = Database(settings.db_file)
-        self.downloader = BlinkDownloader(settings.auth_file, settings.raw_dir, settings.camera_filter)
+        self.downloader = BlinkDownloader(
+            settings.auth_file,
+            settings.raw_dir,
+            settings.camera_filter,
+            download_retries=settings.blink_download_retries,
+            download_delay_seconds=settings.blink_download_delay_seconds,
+            clip_timeout_seconds=settings.blink_clip_timeout_seconds,
+            max_clips_per_scan=settings.blink_max_clips_per_scan,
+        )
         self.analyzer = VideoAnalyzer(
             settings.model_name,
             settings.confidence,
@@ -96,13 +105,21 @@ class MonitorService:
     async def _loop(self) -> None:
         self._running = True
         while self._running:
+            started_at = time.monotonic()
             try:
                 await self.scan()
             except Exception as exc:  # Keep the scheduler alive after recoverable Blink/network errors.
                 self.last_error = str(exc)
                 self.progress.update(phase="error", file=str(exc))
                 LOGGER.exception("scan failed")
-            await asyncio.sleep(self.settings.scan_interval_seconds)
+            elapsed = time.monotonic() - started_at
+            delay = max(1.0, self.settings.scan_interval_seconds - elapsed)
+            LOGGER.info(
+                "[다음 스캔] %.0f초 후 시작 (이번 스캔 %.1f초)",
+                delay,
+                elapsed,
+            )
+            await asyncio.sleep(delay)
 
     async def scan(self, since_override: datetime | None = None) -> dict[str, int]:
         if self._lock.locked():

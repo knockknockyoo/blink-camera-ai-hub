@@ -5,6 +5,7 @@ import unittest
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from backend.analyzer import (
     credible_person_detection,
     credible_vehicle_detection,
     label_is_supported,
+    moving_detection_track,
 )
 from backend.db import Database
 from backend.blink_client import BlinkDownloader
@@ -72,19 +74,61 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(item.attempts, 3)
             self.assertEqual(destination.read_bytes(), b"video")
 
-    def test_classification_prioritizes_people_and_animals(self):
+    def test_blink_clip_download_timeout_skips_for_next_scan(self):
+        class HangingItem:
+            async def prepare_download(self, _blink):
+                await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloader = BlinkDownloader(
+                root / "auth.json",
+                root / "raw",
+                download_retries=1,
+                download_delay_seconds=0,
+                clip_timeout_seconds=0.01,
+            )
+            destination = root / "raw" / "clip.mp4"
+            destination.parent.mkdir(parents=True)
+
+            downloaded = asyncio.run(
+                downloader._download_local_item(HangingItem(), object(), destination)
+            )
+
+            self.assertFalse(downloaded)
+            self.assertFalse(destination.exists())
+
+    def test_blink_backlog_prioritizes_newest_and_defers_the_rest(self):
+        now = datetime.now(timezone.utc)
+        items = [
+            (
+                SimpleNamespace(created_at=now + timedelta(minutes=index)),
+                Path(f"{index}.mp4"),
+            )
+            for index in range(5)
+        ]
+        downloader = BlinkDownloader(
+            Path("auth.json"),
+            Path("raw"),
+            max_clips_per_scan=2,
+        )
+
+        selected, deferred = downloader._prioritize_local_items(items)
+
+        self.assertEqual([path.name for _, path in selected], ["4.mp4", "3.mp4"])
+        self.assertEqual(deferred, 3)
+
+    def test_classification_prioritizes_people_and_ignores_animals(self):
         self.assertEqual(classify_event({"person": 1, "dog": 1}, 0.1), "person")
-        self.assertEqual(classify_event({"dog": 1}, 0.1), "animal")
+        self.assertEqual(classify_event({"dog": 1}, 0.1), "motion")
         self.assertEqual(classify_event({}, 0.08), "motion")
 
     def test_anomaly_rules(self):
         night = datetime(2026, 7, 16, 23, 30, tzinfo=timezone.utc)
         self.assertIn("야간 사람 감지", anomaly_reasons({"person": 1}, night, 0.1))
         self.assertIn("여러 사람 동시 감지", anomaly_reasons({"person": 2}, night, 0.1))
-        self.assertEqual(anomaly_reasons({}, night, 0.09), ["큰 미분류 움직임"])
-        self.assertEqual(
-            anomaly_reasons({"chair": 1}, night, 0.07), ["큰 미분류 움직임"]
-        )
+        self.assertEqual(anomaly_reasons({}, night, 0.09), [])
+        self.assertEqual(anomaly_reasons({"chair": 1}, night, 0.07), [])
 
     def test_static_person_false_positive_is_rejected(self):
         still = np.zeros((90, 160), dtype=np.uint8)
@@ -140,7 +184,30 @@ class CoreTests(unittest.TestCase):
     def test_blurry_short_insect_detection_is_not_a_vehicle(self):
         self.assertFalse(label_is_supported("truck", 4, 30, 387, 700))
         self.assertTrue(label_is_supported("truck", 5, 30, 300, 700))
-        self.assertTrue(label_is_supported("motorcycle", 1, 30, 4000, 700))
+        self.assertFalse(label_is_supported("motorcycle", 1, 30, 4000, 700))
+        self.assertTrue(label_is_supported("motorcycle", 2, 30, 4000, 700))
+
+    def test_animals_and_boats_are_not_supported_targets(self):
+        self.assertFalse(label_is_supported("dog", 20, 30, 4000, 700))
+        self.assertFalse(label_is_supported("bird", 20, 30, 4000, 700))
+        self.assertFalse(label_is_supported("boat", 20, 30, 4000, 700))
+
+    def test_static_detection_track_is_rejected_but_moving_track_is_kept(self):
+        static = [
+            (index, [100 + index, 100, 300 + index, 500]) for index in range(6)
+        ]
+        moving = [
+            (index, [100 + index * 40, 100, 300 + index * 40, 500])
+            for index in range(6)
+        ]
+        frame_shape = (1080, 1920, 3)
+
+        self.assertFalse(
+            moving_detection_track("person", static, frame_shape, 30, 0.06)
+        )
+        self.assertTrue(
+            moving_detection_track("person", moving, frame_shape, 30, 0.06)
+        )
 
     def test_nearby_clips_become_one_event(self):
         now = datetime.now(timezone.utc)

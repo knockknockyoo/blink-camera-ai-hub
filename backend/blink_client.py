@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,9 +16,11 @@ class BlinkDownloader:
         auth_file: Path,
         download_dir: Path,
         camera: str = "all",
-        download_retries: int = 4,
-        download_delay_seconds: float = 4.0,
+        download_retries: int = 1,
+        download_delay_seconds: float = 5.0,
         retry_backoff_seconds: float = 5.0,
+        clip_timeout_seconds: float = 90.0,
+        max_clips_per_scan: int = 20,
     ):
         self.auth_file = auth_file
         self.download_dir = download_dir
@@ -25,6 +28,8 @@ class BlinkDownloader:
         self.download_retries = max(1, download_retries)
         self.download_delay_seconds = max(0.0, download_delay_seconds)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self.clip_timeout_seconds = max(1.0, clip_timeout_seconds)
+        self.max_clips_per_scan = max(0, max_clips_per_scan)
         self.incomplete_downloads = False
 
     @property
@@ -33,36 +38,71 @@ class BlinkDownloader:
 
     async def _download_local_item(self, item, blink, destination: Path) -> bool:
         """Download one Sync Module clip without aborting the whole scan."""
+        started_at = time.monotonic()
         for attempt in range(1, self.download_retries + 1):
+            attempt_started_at = time.monotonic()
             try:
-                prepared = await item.prepare_download(blink)
-                if not prepared:
-                    raise RuntimeError("Blink가 다운로드 준비 명령에 응답하지 않았습니다.")
-                await item.download_video(blink, str(destination))
-                if not destination.exists() or destination.stat().st_size == 0:
-                    raise RuntimeError("Blink가 빈 영상 파일을 반환했습니다.")
-                return True
-            except Exception as exc:
-                destination.unlink(missing_ok=True)
-                if attempt >= self.download_retries:
-                    LOGGER.error(
-                        "[다운로드 실패] %s: %d회 재시도 후 건너뜀 (%s)",
-                        destination.name,
-                        attempt,
-                        exc,
-                    )
-                    return False
-                wait_seconds = self.retry_backoff_seconds * (2 ** (attempt - 1))
-                LOGGER.warning(
-                    "[다운로드 재시도 %d/%d] %s: %s (%d초 후 재시도)",
-                    attempt,
-                    self.download_retries,
+                async with asyncio.timeout(self.clip_timeout_seconds):
+                    prepared = await item.prepare_download(blink)
+                    if not prepared:
+                        raise RuntimeError(
+                            "Blink가 다운로드 준비 명령에 응답하지 않았습니다."
+                        )
+                    await item.download_video(blink, str(destination))
+                    if not destination.exists() or destination.stat().st_size == 0:
+                        raise RuntimeError("Blink가 빈 영상 파일을 반환했습니다.")
+                LOGGER.info(
+                    "[다운로드 성공] %s 크기=%d bytes 소요=%.1f초",
                     destination.name,
-                    exc,
-                    round(wait_seconds),
+                    destination.stat().st_size,
+                    time.monotonic() - started_at,
                 )
-                await asyncio.sleep(wait_seconds)
+                return True
+            except TimeoutError:
+                error = (
+                    f"Blink 영상 준비·다운로드가 "
+                    f"{self.clip_timeout_seconds:g}초를 초과했습니다."
+                )
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+
+            destination.unlink(missing_ok=True)
+            attempt_elapsed = time.monotonic() - attempt_started_at
+            if attempt >= self.download_retries:
+                LOGGER.error(
+                    "[다운로드 실패] %s: %d회 시도 후 건너뜀; "
+                    "다음 스캔에서 재시도 (소요=%.1f초, 원인=%s)",
+                    destination.name,
+                    attempt,
+                    time.monotonic() - started_at,
+                    error,
+                )
+                return False
+            wait_seconds = self.retry_backoff_seconds * (2 ** (attempt - 1))
+            LOGGER.warning(
+                "[다운로드 재시도 %d/%d] %s: %s "
+                "(이번 시도 %.1f초, %d초 후 재시도)",
+                attempt,
+                self.download_retries,
+                destination.name,
+                error,
+                attempt_elapsed,
+                round(wait_seconds),
+            )
+            await asyncio.sleep(wait_seconds)
         return False
+
+    def _prioritize_local_items(self, local_items):
+        """Prefer recent clips and bound one scan so alerts cannot trail a backlog."""
+        ordered = sorted(
+            local_items,
+            key=lambda value: value[0].created_at,
+            reverse=True,
+        )
+        if not self.max_clips_per_scan:
+            return ordered, 0
+        selected = ordered[: self.max_clips_per_scan]
+        return selected, len(ordered) - len(selected)
 
     async def download_new(self, since: datetime | None = None) -> int:
         self.incomplete_downloads = False
@@ -143,7 +183,19 @@ class BlinkDownloader:
                         continue
                     local_items.append((item, destination))
 
-            LOGGER.info("[다운로드] Sync Module 새 영상 %d개 발견", len(local_items))
+            discovered_count = len(local_items)
+            local_items, deferred_count = self._prioritize_local_items(local_items)
+            LOGGER.info(
+                "[다운로드] Sync Module 새 영상 %d개 발견; 최신 %d개 처리",
+                discovered_count,
+                len(local_items),
+            )
+            if deferred_count:
+                self.incomplete_downloads = True
+                LOGGER.warning(
+                    "[다운로드] 오래된 영상 %d개는 다음 스캔으로 이월",
+                    deferred_count,
+                )
             failed_downloads = 0
             for index, (item, destination) in enumerate(local_items, start=1):
                 LOGGER.info(
@@ -166,17 +218,22 @@ class BlinkDownloader:
 
             # Cloud-backed accounts can expose more than the recent-clip window.
             # Downloading again is harmless because BlinkPy skips existing names.
-            try:
-                await blink.download_videos(
-                    str(self.download_dir),
-                    since=since.astimezone().strftime("%Y/%m/%d %H:%M"),
-                    camera=self.camera,
-                    delay=self.download_delay_seconds,
+            if not deferred_count:
+                try:
+                    await blink.download_videos(
+                        str(self.download_dir),
+                        since=since.astimezone().strftime("%Y/%m/%d %H:%M"),
+                        camera=self.camera,
+                        delay=self.download_delay_seconds,
+                    )
+                except Exception as exc:
+                    # Local-storage clips already downloaded above must still be
+                    # analyzed even when Blink throttles the optional cloud pass.
+                    LOGGER.warning("[Cloud 다운로드] 실패했지만 분석은 계속함: %s", exc)
+            else:
+                LOGGER.info(
+                    "[Cloud 다운로드] Sync Module 이월 영상이 있어 이번에는 건너뜀"
                 )
-            except Exception as exc:
-                # Local-storage clips already downloaded above must still be
-                # analyzed even when Blink throttles the optional cloud pass.
-                LOGGER.warning("[Cloud 다운로드] 실패했지만 분석은 계속함: %s", exc)
             await blink.save(str(self.auth_file))
         after = {path.resolve() for path in self.download_dir.rglob("*.mp4")}
         downloaded = len(after - before)

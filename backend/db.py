@@ -135,7 +135,7 @@ class Database:
                 )
 
     def list_events(self, limit: int = 100, important_only: bool = False) -> list[dict[str, Any]]:
-        where = "WHERE kind IN ('person', 'animal') OR anomaly = 1" if important_only else ""
+        where = "WHERE kind = 'person' OR anomaly = 1" if important_only else ""
         with self.connect() as conn:
             rows = conn.execute(
                 f"SELECT * FROM events {where} ORDER BY started_at DESC LIMIT ?",  # noqa: S608

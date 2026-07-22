@@ -12,7 +12,6 @@ LOGGER = logging.getLogger("blink-camera-ai-hub")
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
 KIND_NAMES = {
     "person": "사람",
-    "animal": "동물",
     "motion": "이상 움직임",
     "vehicle": "차량",
 }

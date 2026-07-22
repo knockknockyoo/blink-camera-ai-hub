@@ -2,17 +2,17 @@
 
 **English** | [한국어](README.ko.md)
 
-Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor cameras and analyzes them locally with AI. It detects people, animals, and genuinely moving vehicles, joins related clips into event videos, and delivers the results through a local dashboard and Telegram.
+Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor cameras and analyzes them locally with AI. It detects people and genuinely moving vehicles, joins related clips into event videos, and delivers the results through a local dashboard and Telegram.
 
 > This is an unofficial open-source project and is not affiliated with Amazon, Blink, or Immedia Semiconductor. Keep camera footage, Blink credentials, and Telegram tokens local. Never commit them to Git.
 
 ## Features
 
 - Checks a Blink Sync Module for new clips every five minutes by default
-- Detects people, animals, and vehicles with YOLO
+- Detects people and moving land vehicles with YOLO; animal detections are ignored
 - Combines detections across frames with motion and sharpness checks to reduce insect and parked-vehicle false positives
 - Merges only time-correlated clips from the same camera into an event
-- Flags people at night, multiple people, repeated activity, and large unknown motion as anomalies
+- Flags people at night, multiple people, and repeated target activity as anomalies
 - Provides a local web dashboard and Telegram MP4 notifications
 - Stores metadata in SQLite and applies a 90-day default video-retention policy
 - Includes Apple Silicon launchers and a backend-only Docker configuration
@@ -60,7 +60,7 @@ Create a bot with Telegram's `@BotFather`. Send `/start` in a private chat with 
 bash scripts/connect_telegram.sh
 ```
 
-The token is hidden while you type and is stored only in the local `.env` file. New person, animal, and anomaly event videos are then uploaded directly to Telegram. No public URL or router port forwarding is required.
+The token is hidden while you type and is stored only in the local `.env` file. New person, moving-vehicle, and anomaly event videos are then uploaded directly to Telegram. No public URL or router port forwarding is required.
 
 `TELEGRAM_PROTECT_CONTENT=true` limits forwarding and saving of Telegram messages by default. Existing events are skipped during the initial connection, and failed new notifications are retried on a later scan.
 
@@ -114,6 +114,10 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `SCAN_INTERVAL_SECONDS` | `300` | Interval between checks for new Blink clips |
+| `BLINK_CLIP_TIMEOUT_SECONDS` | `90` | Maximum time one Sync Module clip may block a scan |
+| `BLINK_DOWNLOAD_RETRIES` | `1` | Attempts per clip in one scan; failures retry on the next scan |
+| `BLINK_MAX_CLIPS_PER_SCAN` | `20` | Maximum clips processed per scan, newest first; `0` disables the limit |
+| `BLINK_DOWNLOAD_DELAY_SECONDS` | `5` | Pause between clip downloads to reduce Blink throttling |
 | `MERGE_WINDOW_SECONDS` | `120` | Time window for joining related clips |
 | `VIDEO_RETENTION_DAYS` | `90` | Retention period; `0` disables automatic deletion |
 | `MODEL_NAME` | `yolo11n.pt` | Ultralytics model name or local path |

@@ -8,27 +8,15 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
-ANIMALS = {
-    "bird",
-    "cat",
-    "dog",
-    "horse",
-    "sheep",
-    "cow",
-    "elephant",
-    "bear",
-    "zebra",
-    "giraffe",
-}
-VEHICLES = {"bicycle", "car", "motorcycle", "bus", "truck", "boat"}
-INTEREST_LABELS = {"person", *ANIMALS, *VEHICLES}
+# Animals are intentionally ignored, and "boat" is excluded because fixed yard
+# equipment is frequently mislabeled as a boat by small general-purpose models.
+VEHICLES = {"bicycle", "car", "motorcycle", "bus", "truck"}
+INTEREST_LABELS = {"person", *VEHICLES}
 
 
 def classify_event(labels: dict[str, int], motion_score: float) -> str:
     if labels.get("person", 0):
         return "person"
-    if any(labels.get(name, 0) for name in ANIMALS):
-        return "animal"
     if any(labels.get(name, 0) for name in VEHICLES):
         return "vehicle"
     if motion_score >= 0.02:
@@ -52,11 +40,6 @@ def anomaly_reasons(
         reasons.append("여러 사람 동시 감지")
     if repeated_activity:
         reasons.append("짧은 시간 반복 활동")
-    # A general-purpose model can call a small utility vehicle a boat or another
-    # unrelated class. Treat significant motion with no useful target as an
-    # anomaly even when such an irrelevant label is present.
-    if not any(labels.get(name, 0) for name in INTEREST_LABELS) and motion_score >= 0.06:
-        reasons.append("큰 미분류 움직임")
     return reasons
 
 
@@ -75,12 +58,79 @@ def credible_person_detection(
         frame_width * frame_height
     )
     motion = box_motion_fraction(box, frame_shape, gray_frames, frame_index)
-    if normalized_area >= min_area:
-        # Blink records because something moved. A large but completely static
-        # "person" is usually a tool, statue, or other fixed yard object.
-        return motion >= min(min_motion, 0.01)
+    if normalized_area <= 0:
+        return False
+    # Large false people are commonly fixed covers, posts, or equipment with
+    # leaves moving across them. Never relax the motion requirement for a large
+    # box. Tiny distant boxes need slightly stronger evidence.
+    required_motion = min_motion * (1.25 if normalized_area < min_area else 1.0)
+    return motion >= min(1.0, required_motion)
 
-    return motion >= min_motion
+
+def box_iou(left: list[float], right: list[float]) -> float:
+    """Return intersection-over-union for two object boxes."""
+    x1 = max(left[0], right[0])
+    y1 = max(left[1], right[1])
+    x2 = min(left[2], right[2])
+    y2 = min(left[3], right[3])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    left_area = max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1])
+    right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
+    union = left_area + right_area - intersection
+    return intersection / union if union else 0.0
+
+
+def moving_detection_track(
+    label: str,
+    detections: list[tuple[int, list[float]]],
+    frame_shape: tuple[int, ...],
+    frame_count: int,
+    min_motion: float,
+) -> bool:
+    """Require a coherent detection track whose center actually moves."""
+    if not detections:
+        return False
+
+    tracks: list[list[tuple[int, list[float]]]] = []
+    for frame_index, box in detections:
+        choices = [
+            (box_iou(track[-1][1], box), track)
+            for track in tracks
+            if 0 < frame_index - track[-1][0] <= 2
+        ]
+        overlap, track = max(choices, default=(0.0, None), key=lambda value: value[0])
+        if track is not None and overlap >= 0.1:
+            track.append((frame_index, box))
+        else:
+            tracks.append([(frame_index, box)])
+
+    frame_height, frame_width = frame_shape[:2]
+    minimum_frames = (
+        min(6, max(3, math.ceil(frame_count * 0.12)))
+        if label == "person"
+        else min(5, max(2, math.ceil(frame_count * 0.12)))
+    )
+    for track in tracks:
+        if len(track) < minimum_frames:
+            continue
+        centers = [
+            (
+                (box[0] + box[2]) / 2 / frame_width,
+                (box[1] + box[3]) / 2 / frame_height,
+            )
+            for _, box in track
+        ]
+        center_motion = max(
+            (
+                math.hypot(after[0] - before[0], after[1] - before[1])
+                for before in centers
+                for after in centers
+            ),
+            default=0.0,
+        )
+        if center_motion >= min_motion:
+            return True
+    return False
 
 
 def box_motion_fraction(
@@ -150,15 +200,17 @@ def label_is_supported(
     vehicle_sharpness: float,
     min_vehicle_sharpness: float,
 ) -> bool:
+    if label == "person":
+        required = min(6, max(3, math.ceil(frame_count * 0.12)))
+        return count >= required
     if label in VEHICLES:
         # A blurry insect usually disappears within a few frames. A low-focus
         # vehicle must persist, while a sharp fast target may appear once.
         required = min(5, max(2, math.ceil(frame_count * 0.18)))
-        return count >= required or vehicle_sharpness >= min_vehicle_sharpness
-    if label in INTEREST_LABELS:
-        return count >= 1
-    required = 1 if frame_count <= 2 else max(2, math.ceil(frame_count * 0.18))
-    return count >= required
+        return count >= required or (
+            count >= 2 and vehicle_sharpness >= min_vehicle_sharpness
+        )
+    return False
 
 
 class VideoAnalyzer:
@@ -242,6 +294,7 @@ class VideoAnalyzer:
         per_frame: list[set[str]] = []
         max_instances: Counter[str] = Counter()
         vehicle_sharpness: dict[str, float] = {}
+        detection_boxes: dict[str, list[tuple[int, list[float]]]] = {}
         max_confidence = 0.0
         for frame_index, result in enumerate(results):
             names = result.names
@@ -253,6 +306,8 @@ class VideoAnalyzer:
                     result.boxes.conf.tolist(),
                 ):
                     label = str(names[int(cls_id)])
+                    if label not in INTEREST_LABELS:
+                        continue
                     if label == "person" and not credible_person_detection(
                         box,
                         frames[frame_index].shape,
@@ -276,6 +331,7 @@ class VideoAnalyzer:
                             detection_sharpness(box, frames[frame_index]),
                         )
                     frame_labels.append(label)
+                    detection_boxes.setdefault(label, []).append((frame_index, box))
                     max_confidence = max(max_confidence, float(confidence))
             for label, count in Counter(frame_labels).items():
                 max_instances[label] = max(max_instances[label], count)
@@ -291,6 +347,17 @@ class VideoAnalyzer:
                 len(per_frame),
                 vehicle_sharpness.get(label, 0.0),
                 self.vehicle_min_sharpness,
+            )
+            and moving_detection_track(
+                label,
+                detection_boxes.get(label, []),
+                frames[0].shape,
+                len(per_frame),
+                (
+                    self.person_min_box_motion
+                    if label == "person"
+                    else self.vehicle_min_box_motion
+                ),
             )
         }
 

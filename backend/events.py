@@ -7,15 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .analyzer import ANIMALS, VEHICLES, classify_event
+from .analyzer import VEHICLES, classify_event
 
 
 def _target_families(labels: dict[str, int]) -> set[str]:
     families: set[str] = set()
     if labels.get("person", 0):
         families.add("person")
-    if any(labels.get(name, 0) for name in ANIMALS):
-        families.add("animal")
     if any(labels.get(name, 0) for name in VEHICLES):
         families.add("vehicle")
     return families
@@ -87,7 +85,7 @@ def build_event(group: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def should_keep(event: dict[str, Any], keep_unknown_motion: bool) -> bool:
-    if event["kind"] in {"person", "animal", "vehicle"}:
+    if event["kind"] in {"person", "vehicle"}:
         return True
     if event["anomaly"]:
         return True
@@ -147,8 +145,3 @@ def concatenate(paths: list[Path], output: Path) -> Path | None:
         result = subprocess.run(transcode_command, capture_output=True, check=False)
     list_file.unlink(missing_ok=True)
     return output if result.returncode == 0 and output.exists() else existing[0]
-
-
-def primary_animal(labels: dict[str, int]) -> str | None:
-    matches = [(count, label) for label, count in labels.items() if label in ANIMALS]
-    return max(matches)[1] if matches else None
