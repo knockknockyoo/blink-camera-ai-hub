@@ -115,7 +115,7 @@ class MonitorService:
             elapsed = time.monotonic() - started_at
             delay = max(1.0, self.settings.scan_interval_seconds - elapsed)
             LOGGER.info(
-                "[다음 스캔] %.0f초 후 시작 (이번 스캔 %.1f초)",
+                "[Next scan] Starting in %.0fs (current scan %.1fs)",
                 delay,
                 elapsed,
             )
@@ -125,7 +125,7 @@ class MonitorService:
         if self._lock.locked():
             return {"downloaded": 0, "analyzed": 0, "events": 0}
         async with self._lock:
-            LOGGER.info("[스캔 시작]")
+            LOGGER.info("[Scan started]")
             await self.cleanup_expired_media()
             downloaded = 0
             if self.downloader.configured and not self.settings.demo_mode:
@@ -141,11 +141,11 @@ class MonitorService:
                 for path in sorted(self.settings.raw_dir.rglob("*.mp4"))
                 if not self.db.clip_exists(path)
             ]
-            LOGGER.info("[AI 분석] 대기 영상 %d개", len(pending))
+            LOGGER.info("[AI analysis] %d clips pending", len(pending))
             self.progress.update(phase="analyzing", current=0, total=len(pending), file=None)
             for index, path in enumerate(pending, start=1):
                 self.progress.update(current=index, file=path.name)
-                LOGGER.info("[AI 분석 %d/%d] 시작: %s", index, len(pending), path.name)
+                LOGGER.info("[AI analysis %d/%d] Started: %s", index, len(pending), path.name)
                 camera, captured_at = infer_metadata(path)
                 result = await asyncio.to_thread(self.analyzer.analyze, path, captured_at)
                 result.update(
@@ -159,7 +159,7 @@ class MonitorService:
                 cameras.add(camera)
                 analyzed += 1
                 LOGGER.info(
-                    "[AI 분석 %d/%d] 완료: labels=%s score=%.3f motion=%.4f anomaly=%s",
+                    "[AI analysis %d/%d] Complete: labels=%s score=%.3f motion=%.4f anomaly=%s",
                     index,
                     len(pending),
                     result.get("labels", {}),
@@ -170,7 +170,7 @@ class MonitorService:
 
             for camera in cameras:
                 self.progress.update(phase="events", current=0, total=len(cameras), file=camera)
-                LOGGER.info("[이벤트 생성] 카메라=%s", camera)
+                LOGGER.info("[Event creation] camera=%s", camera)
                 await asyncio.to_thread(self.rebuild_events, camera)
 
             await self.notify_telegram(self.db.list_events(limit=500))
@@ -178,7 +178,7 @@ class MonitorService:
             now = datetime.now(timezone.utc).isoformat()
             if self.downloader.incomplete_downloads:
                 LOGGER.warning(
-                    "[스캔] 실패 영상 재시도를 위해 last_scan 시각을 유지함"
+                    "[Scan] Keeping last_scan unchanged so failed clips can be retried"
                 )
             else:
                 self.db.set_state("last_scan", now)
@@ -186,7 +186,7 @@ class MonitorService:
             event_count = len(self.db.list_events())
             self.progress.update(phase="idle", current=0, total=0, file=None)
             LOGGER.info(
-                "[스캔 완료] downloaded=%d analyzed=%d events=%d",
+                "[Scan complete] downloaded=%d analyzed=%d events=%d",
                 downloaded,
                 analyzed,
                 event_count,
@@ -227,17 +227,17 @@ class MonitorService:
 
         if video_stats["files"] or db_stats["clips"] or db_stats["events"]:
             LOGGER.info(
-                "[보관 정리] %d일 초과 영상 %d개 삭제 (%.1f MB), "
-                "DB 클립 %d개/이벤트 %d개 정리",
-                retention_days,
+                "[Retention cleanup] Deleted %d files older than %d days (%.1f MB), "
+                "removed %d clips and %d events from the database",
                 video_stats["files"],
+                retention_days,
                 video_stats["bytes"] / (1024 * 1024),
                 db_stats["clips"],
                 db_stats["events"],
             )
         if video_stats["failed"]:
             LOGGER.warning(
-                "[보관 정리] 파일 %d개를 삭제하지 못해 다음 정리 때 재시도",
+                "[Retention cleanup] Failed to delete %d files; retrying during the next cleanup",
                 video_stats["failed"],
             )
 
@@ -267,7 +267,7 @@ class MonitorService:
         for event in self.db.list_events(limit=500):
             self.db.set_state(self._telegram_key(event), "existing")
         self.db.set_state("telegram:initialized", datetime.now(timezone.utc).isoformat())
-        LOGGER.info("[Telegram] 기존 이벤트는 발송 대상에서 제외함")
+        LOGGER.info("[Telegram] Existing events excluded from notifications")
 
     def reload_telegram_settings(self) -> bool:
         values = dotenv_values(ROOT / ".env")
@@ -284,7 +284,7 @@ class MonitorService:
             protect,
         )
         self._initialize_telegram_history()
-        LOGGER.info("[Telegram] 설정 다시 읽기: configured=%s", self.telegram.configured)
+        LOGGER.info("[Telegram] Settings reloaded: configured=%s", self.telegram.configured)
         return self.telegram.configured
 
     async def notify_telegram(self, events: list[dict[str, Any]]) -> None:
@@ -296,7 +296,7 @@ class MonitorService:
                 continue
             self.progress.update(phase="notifying", file=event.get("video_path"))
             LOGGER.info(
-                "[Telegram] 발송 시작: camera=%s kind=%s started=%s",
+                "[Telegram] Sending: camera=%s kind=%s started=%s",
                 event["camera"],
                 event["kind"],
                 event["started_at"],

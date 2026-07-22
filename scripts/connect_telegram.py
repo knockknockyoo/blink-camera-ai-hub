@@ -34,17 +34,17 @@ async def api(token: str, method: str, **params):
         async with session.post(url, data=params) as response:
             result = await response.json(content_type=None)
     if not result.get("ok"):
-        raise RuntimeError(result.get("description", "Telegram API 오류"))
+        raise RuntimeError(result.get("description", "Telegram API error"))
     return result["result"]
 
 
 async def main() -> None:
-    print("Telegram Bot 토큰은 화면에 표시되거나 로그에 남지 않습니다.")
-    token = getpass.getpass("@BotFather가 발급한 Bot Token: ").strip()
+    print("The Telegram bot token will not be displayed or written to logs.")
+    token = getpass.getpass("Bot token issued by @BotFather: ").strip()
     bot = await api(token, "getMe")
-    print(f"Bot 확인 완료: @{bot['username']}")
-    print(f"Telegram에서 @{bot['username']}에게 /start 또는 아무 메시지를 보내세요.")
-    input("메시지를 보낸 뒤 Enter를 누르세요: ")
+    print(f"Bot verified: @{bot['username']}")
+    print(f"Send /start or any message to @{bot['username']} in Telegram.")
+    input("Press Enter after sending the message: ")
     updates = await api(token, "getUpdates", timeout="0", limit="100")
     chats = [
         update["message"]["chat"]
@@ -52,7 +52,7 @@ async def main() -> None:
         if update.get("message", {}).get("chat", {}).get("id") is not None
     ]
     if not chats:
-        raise RuntimeError("Bot에 보낸 메시지를 찾지 못했습니다. /start를 보낸 뒤 다시 실행하세요.")
+        raise RuntimeError("No message to the bot was found. Send /start and run this setup again.")
     chat = chats[-1]
     chat_id = str(chat["id"])
     save_env(
@@ -66,7 +66,7 @@ async def main() -> None:
         token,
         "sendMessage",
         chat_id=chat_id,
-        text="✅ Blink Camera AI Hub Telegram 연결이 완료됐습니다.",
+        text="✅ Blink Camera AI Hub is connected to Telegram.",
         protect_content="true",
     )
     try:
@@ -75,10 +75,10 @@ async def main() -> None:
                 "http://127.0.0.1:8787/api/telegram/reload"
             ) as response:
                 if response.status == 200:
-                    print("실행 중인 Blink Camera AI Hub에도 Telegram 설정을 적용했습니다.")
+                    print("Telegram settings were applied to the running Blink Camera AI Hub service.")
     except aiohttp.ClientError:
-        print("Blink Camera AI Hub가 꺼져 있습니다. bash scripts/run.sh로 실행하세요.")
-    print("Telegram 연결 완료.")
+        print("Blink Camera AI Hub is not running. Start it with bash scripts/run.sh.")
+    print("Telegram setup complete.")
 
 
 if __name__ == "__main__":

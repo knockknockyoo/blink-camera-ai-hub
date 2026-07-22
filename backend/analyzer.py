@@ -35,11 +35,11 @@ def anomaly_reasons(
     people = labels.get("person", 0)
     local_time = captured_at.astimezone(ZoneInfo(timezone_name))
     if people and (local_time.hour >= 22 or local_time.hour < 6):
-        reasons.append("야간 사람 감지")
+        reasons.append("Person detected at night")
     if people >= 2:
-        reasons.append("여러 사람 동시 감지")
+        reasons.append("Multiple people detected")
     if repeated_activity:
-        reasons.append("짧은 시간 반복 활동")
+        reasons.append("Repeated activity in a short period")
     return reasons
 
 
@@ -243,7 +243,7 @@ class VideoAnalyzer:
                 from ultralytics import YOLO
             except ImportError as exc:
                 raise RuntimeError(
-                    "AI 패키지가 설치되지 않았습니다. bash scripts/setup.sh를 먼저 실행하세요."
+                    "AI dependencies are not installed. Run bash scripts/setup.sh first."
                 ) from exc
             self._model = YOLO(self.model_name)
         return self._model
@@ -253,7 +253,7 @@ class VideoAnalyzer:
             import cv2
             import numpy as np
         except ImportError as exc:
-            raise RuntimeError("OpenCV가 설치되지 않았습니다.") from exc
+            raise RuntimeError("OpenCV is not installed.") from exc
 
         capture = cv2.VideoCapture(str(path))
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)

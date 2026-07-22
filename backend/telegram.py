@@ -11,9 +11,9 @@ import aiohttp
 LOGGER = logging.getLogger("blink-camera-ai-hub")
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
 KIND_NAMES = {
-    "person": "사람",
-    "motion": "이상 움직임",
-    "vehicle": "차량",
+    "person": "Person",
+    "motion": "Unclassified motion",
+    "vehicle": "Vehicle",
 }
 
 
@@ -42,11 +42,11 @@ class TelegramNotifier:
         labels = ", ".join(
             f"{name} {count}" for name, count in event.get("labels", {}).items()
         )
-        anomaly = "\n⚠️ 이상징후 감지" if event.get("anomaly") else ""
-        details = f"\n감지: {labels}" if labels else ""
+        anomaly = "\n⚠️ Anomaly detected" if event.get("anomaly") else ""
+        details = f"\nDetected: {labels}" if labels else ""
         return (
             f"🚨 Blink Camera AI Hub · {kind}\n"
-            f"카메라 {event['camera']} · {captured:%Y-%m-%d %H:%M:%S KST}"
+            f"Camera {event['camera']} · {captured:%Y-%m-%d %H:%M:%S KST}"
             f"{details}{anomaly}"
         )
 
@@ -55,10 +55,10 @@ class TelegramNotifier:
             return False
         path = Path(event["video_path"])
         if not path.exists():
-            LOGGER.error("[Telegram] 영상 파일 없음: %s", path)
+            LOGGER.error("[Telegram] Video file not found: %s", path)
             return False
         if path.stat().st_size > MAX_VIDEO_BYTES:
-            LOGGER.error("[Telegram] 영상이 50MB를 초과해 발송하지 않음: %s", path.name)
+            LOGGER.error("[Telegram] Video exceeds 50 MB and will not be sent: %s", path.name)
             return False
 
         form = aiohttp.FormData()
@@ -80,14 +80,14 @@ class TelegramNotifier:
                     async with session.post(url, data=form) as response:
                         result = await response.json(content_type=None)
         except Exception:
-            LOGGER.exception("[Telegram] 발송 요청 실패")
+            LOGGER.exception("[Telegram] Send request failed")
             return False
         if response.status != 200 or not result.get("ok"):
             LOGGER.error(
-                "[Telegram] 발송 실패: HTTP=%s description=%s",
+                "[Telegram] Send failed: HTTP=%s description=%s",
                 response.status,
                 result.get("description", "unknown"),
             )
             return False
-        LOGGER.info("[Telegram] 영상 발송 완료: %s", path.name)
+        LOGGER.info("[Telegram] Video sent: %s", path.name)
         return True

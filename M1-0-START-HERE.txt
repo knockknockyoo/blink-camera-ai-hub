@@ -1,21 +1,20 @@
-Blink Camera AI Hub - Apple Silicon(M1/M2/M3/M4) 설치 순서
+Blink Camera AI Hub - Apple Silicon (M1/M2/M3/M4) Setup
 
-1. 이 ZIP을 개인용 Mac에 풀어 놓습니다.
-2. M1-1-Install.command 를 더블클릭합니다. (최초 1회, 인터넷 필요)
-3. M1-2-Connect-Blink.command 를 더블클릭해 Blink 계정을 연결합니다.
-4. 선택 사항: M1-3-Connect-Telegram.command 로 알림을 연결합니다.
-5. M1-4-Start.command 를 더블클릭하면 약 4초 뒤 화면이 열립니다.
+1. Extract this ZIP on your personal Mac.
+2. Double-click M1-1-Install.command. This is required once and needs internet access.
+3. Double-click M1-2-Connect-Blink.command to connect your Blink account.
+4. Optional: connect notifications with M1-3-Connect-Telegram.command.
+5. Double-click M1-4-Start.command. The dashboard opens after about four seconds.
 
-분석 진행 상황은 M1-5-View-Logs.command 로 볼 수 있습니다.
-프로그램을 중지하려면 실행 중인 터미널에서 Control+C를 누르세요.
+Use M1-5-View-Logs.command to follow analysis progress.
+Press Control+C in the running terminal to stop the application.
 
-필수 조건
-- macOS Apple Silicon
-- Python 3.10~3.13 (3.13 권장)
-- Node.js 22 이상
-- 최초 설치 및 Blink 동기화 시 인터넷 연결
+Requirements
+- macOS on Apple Silicon
+- Python 3.10 through 3.13 (3.13 recommended)
+- Node.js 22 or newer
+- Internet access during initial setup and Blink synchronization
 
-macOS가 파일 실행을 막으면 파일을 Control+클릭(또는 오른쪽 클릭)한 뒤
-"열기"를 선택하세요.
+If macOS blocks a launcher, Control-click or right-click the file and select Open.
 
-이 배포 ZIP에는 Blink 인증정보, Telegram 토큰, 다운로드한 영상이 없습니다.
+This distribution ZIP does not contain Blink credentials, Telegram tokens, or downloaded videos.

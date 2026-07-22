@@ -125,8 +125,8 @@ class CoreTests(unittest.TestCase):
 
     def test_anomaly_rules(self):
         night = datetime(2026, 7, 16, 23, 30, tzinfo=timezone.utc)
-        self.assertIn("야간 사람 감지", anomaly_reasons({"person": 1}, night, 0.1))
-        self.assertIn("여러 사람 동시 감지", anomaly_reasons({"person": 2}, night, 0.1))
+        self.assertIn("Person detected at night", anomaly_reasons({"person": 1}, night, 0.1))
+        self.assertIn("Multiple people detected", anomaly_reasons({"person": 2}, night, 0.1))
         self.assertEqual(anomaly_reasons({}, night, 0.09), [])
         self.assertEqual(anomaly_reasons({"chair": 1}, night, 0.07), [])
 
@@ -337,8 +337,8 @@ class CoreTests(unittest.TestCase):
                 "anomaly": True,
             }
         )
-        self.assertIn("사람", text)
-        self.assertIn("이상징후", text)
+        self.assertIn("Person", text)
+        self.assertIn("Anomaly", text)
 
 
 if __name__ == "__main__":

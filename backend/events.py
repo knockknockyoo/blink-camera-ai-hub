@@ -68,7 +68,7 @@ def build_event(group: list[dict[str, Any]]) -> dict[str, Any]:
         labels.update(clip["labels"])
         reasons.extend(clip["anomaly_reasons"])
     if len(group) >= 3:
-        reasons.append("짧은 시간 반복 활동")
+        reasons.append("Repeated activity in a short period")
     labels_dict = dict(labels)
     kind = classify_event(labels_dict, max(clip["motion_score"] for clip in group))
     return {

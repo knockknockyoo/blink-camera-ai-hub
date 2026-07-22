@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type EventKind = "person" | "animal" | "vehicle" | "motion" | "noise";
+type EventKind = "person" | "vehicle" | "motion" | "noise";
 
 type MonitorEvent = {
   id: number;
@@ -38,7 +38,7 @@ const DEMO_EVENTS: MonitorEvent[] = [
     kind: "person",
     score: 0.94,
     anomaly: true,
-    anomaly_reasons: ["짧은 시간 반복 활동"],
+    anomaly_reasons: ["Repeated activity in a short period"],
     labels: { person: 1 },
     clip_ids: [1, 2, 3],
     video_path: null,
@@ -48,11 +48,11 @@ const DEMO_EVENTS: MonitorEvent[] = [
     camera: "Outdoor",
     started_at: "2026-07-16T17:53:00-04:00",
     ended_at: "2026-07-16T17:53:00-04:00",
-    kind: "animal",
+    kind: "vehicle",
     score: 0.89,
     anomaly: false,
     anomaly_reasons: [],
-    labels: { dog: 1 },
+    labels: { car: 1 },
     clip_ids: [4],
     video_path: null,
   },
@@ -63,8 +63,8 @@ const DEMO_EVENTS: MonitorEvent[] = [
     ended_at: "2026-07-16T15:00:00-04:00",
     kind: "motion",
     score: 0,
-    anomaly: true,
-    anomaly_reasons: ["큰 미분류 움직임"],
+    anomaly: false,
+    anomaly_reasons: [],
     labels: {},
     clip_ids: [5],
     video_path: null,
@@ -72,15 +72,15 @@ const DEMO_EVENTS: MonitorEvent[] = [
 ];
 
 const LABELS: Record<string, string> = {
-  person: "사람",
-  animal: "동물",
-  vehicle: "차량",
-  motion: "미분류 움직임",
-  noise: "잡음",
-  dog: "개",
-  cat: "고양이",
-  bird: "새",
-  bear: "곰",
+  person: "Person",
+  vehicle: "Vehicle",
+  motion: "Unclassified motion",
+  noise: "Noise",
+  bicycle: "Bicycle",
+  car: "Car",
+  motorcycle: "Motorcycle",
+  bus: "Bus",
+  truck: "Truck",
 };
 
 function kindLabel(kind: string) {
@@ -88,7 +88,7 @@ function kindLabel(kind: string) {
 }
 
 function formatTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", {
+  return new Intl.DateTimeFormat("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
@@ -97,7 +97,7 @@ function formatTime(value: string) {
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", {
+  return new Intl.DateTimeFormat("en-US", {
     month: "long",
     day: "numeric",
     weekday: "short",
@@ -106,18 +106,18 @@ function formatDate(value: string) {
 }
 
 function relativeTime(value: string | null) {
-  if (!value) return "아직 없음";
+  if (!value) return "Never";
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60_000));
-  if (minutes < 1) return "방금 전";
-  if (minutes < 60) return `${minutes}분 전`;
-  return `${Math.floor(minutes / 60)}시간 전`;
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.floor(minutes / 60)} hr ago`;
 }
 
 export default function Home() {
   const [events, setEvents] = useState<MonitorEvent[]>(DEMO_EVENTS);
   const [status, setStatus] = useState<Status | null>(null);
   const [selectedId, setSelectedId] = useState<number>(DEMO_EVENTS[0].id);
-  const [filter, setFilter] = useState<"important" | "person" | "animal" | "anomaly" | "all">("important");
+  const [filter, setFilter] = useState<"important" | "person" | "vehicle" | "anomaly" | "all">("important");
   const [backendOnline, setBackendOnline] = useState(false);
   const [scanPending, setScanPending] = useState(false);
 
@@ -156,7 +156,7 @@ export default function Home() {
     () =>
       events.filter((event) => {
         if (filter === "all") return true;
-        if (filter === "important") return event.kind === "person" || event.kind === "animal" || event.anomaly;
+        if (filter === "important") return event.kind === "person" || event.kind === "vehicle" || event.anomaly;
         if (filter === "anomaly") return event.anomaly;
         return event.kind === filter;
       }),
@@ -195,57 +195,57 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true"><i /></span>
           <div>
             <strong>Blink Camera AI Hub</strong>
-            <span>로컬 AI 카메라 모니터</span>
+            <span>Local AI Camera Monitor</span>
           </div>
         </div>
         <div className="system-state">
           <span className={`pulse ${backendOnline ? "online" : "demo"}`} />
           <div>
-            <strong>{backendOnline ? (status?.configured ? "Blink 연결됨" : "로컬 모드") : "데모 화면"}</strong>
-            <span>{backendOnline ? `마지막 확인 ${relativeTime(status?.last_scan || null)}` : "백엔드를 실행하면 실제 데이터로 전환"}</span>
+            <strong>{backendOnline ? (status?.configured ? "Blink connected" : "Local mode") : "Demo preview"}</strong>
+            <span>{backendOnline ? `Last checked ${relativeTime(status?.last_scan || null)}` : "Start the backend to load live data"}</span>
           </div>
           <button className="scan-button" onClick={scanNow} disabled={!backendOnline || scanPending}>
-            {scanPending ? "확인 중…" : "지금 확인"}
+            {scanPending ? "Scanning…" : "Scan now"}
           </button>
         </div>
       </header>
 
-      <section className="overview" aria-label="오늘의 감지 요약">
+      <section className="overview" aria-label="Today's detection summary">
         <div className="overview-copy">
           <p className="eyebrow">TODAY · OUTDOOR</p>
-          <h1>중요한 움직임만<br />한눈에 확인하세요.</h1>
-          <p>사람과 동물을 먼저 보여주고, 가까운 시간의 클립은 하나의 사건으로 연결합니다.</p>
+          <h1>See important motion<br />at a glance.</h1>
+          <p>Prioritize people and moving vehicles, then join closely related clips into a single event.</p>
         </div>
         <div className="metrics">
-          <article><span>전체 사건</span><strong>{counts.total}</strong><small>자동 정리됨</small></article>
-          <article><span>사람</span><strong>{counts.people}</strong><small>우선 보관</small></article>
-          <article><span>동물</span><strong>{counts.animals}</strong><small>우선 보관</small></article>
-          <article className="alert-metric"><span>이상징후</span><strong>{counts.anomalies}</strong><small>검토 필요</small></article>
+          <article><span>Total events</span><strong>{counts.total}</strong><small>Automatically organized</small></article>
+          <article><span>People</span><strong>{counts.people}</strong><small>Prioritized</small></article>
+          <article><span>Vehicles</span><strong>{events.filter((event) => event.kind === "vehicle").length}</strong><small>Moving only</small></article>
+          <article className="alert-metric"><span>Anomalies</span><strong>{counts.anomalies}</strong><small>Review recommended</small></article>
         </div>
       </section>
 
-      {status?.last_error && <div className="error-banner">최근 확인 중 오류: {status.last_error}</div>}
+      {status?.last_error && <div className="error-banner">Last scan error: {status.last_error}</div>}
 
-      <nav className="filters" aria-label="감지 유형 필터">
+      <nav className="filters" aria-label="Detection type filters">
         {([
-          ["important", "중요 항목"],
-          ["person", "사람"],
-          ["animal", "동물"],
-          ["anomaly", "이상징후"],
-          ["all", "전체"],
+          ["important", "Important"],
+          ["person", "People"],
+          ["vehicle", "Vehicles"],
+          ["anomaly", "Anomalies"],
+          ["all", "All"],
         ] as const).map(([value, label]) => (
           <button key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>
             {label}
           </button>
         ))}
-        <span className="interval-note">5분 간격 자동 확인</span>
+        <span className="interval-note">Automatic scan every 5 minutes</span>
       </nav>
 
       <section className="workspace">
         <div className="timeline-panel">
           <div className="section-heading">
-            <div><span>EVENT TIMELINE</span><h2>{filtered.length}개의 사건</h2></div>
-            <small>최신순</small>
+            <div><span>EVENT TIMELINE</span><h2>{filtered.length} events</h2></div>
+            <small>Newest first</small>
           </div>
           <div className="event-list">
             {filtered.map((event, index) => {
@@ -259,19 +259,19 @@ export default function Home() {
                   >
                     <span className="event-time">{formatTime(event.started_at)}</span>
                     <span className={`event-icon ${event.kind}`} aria-hidden="true">
-                      {event.kind === "person" ? "人" : event.kind === "animal" ? "●" : event.kind === "vehicle" ? "■" : "≈"}
+                      {event.kind === "person" ? "P" : event.kind === "vehicle" ? "■" : "≈"}
                     </span>
                     <span className="event-copy">
-                      <strong>{kindLabel(event.kind)} 감지</strong>
-                      <span>{event.clip_ids.length > 1 ? `${event.clip_ids.length}개 클립 연결` : event.camera}</span>
+                      <strong>{kindLabel(event.kind)} detected</strong>
+                      <span>{event.clip_ids.length > 1 ? `${event.clip_ids.length} clips joined` : event.camera}</span>
                     </span>
-                    {event.anomaly && <span className="anomaly-badge">주의</span>}
-                    <span className="confidence">{event.score ? `${Math.round(event.score * 100)}%` : "분석"}</span>
+                    {event.anomaly && <span className="anomaly-badge">Review</span>}
+                    <span className="confidence">{event.score ? `${Math.round(event.score * 100)}%` : "Analyzed"}</span>
                   </button>
                 </div>
               );
             })}
-            {!filtered.length && <div className="empty-state">이 조건에 맞는 사건이 없습니다.</div>}
+            {!filtered.length && <div className="empty-state">No events match this filter.</div>}
           </div>
         </div>
 
@@ -284,8 +284,8 @@ export default function Home() {
                 ) : (
                   <div className="camera-placeholder">
                     <div className="scan-lines" />
-                    <span className={`large-marker ${selected.kind}`}>{selected.kind === "person" ? "人" : selected.kind === "animal" ? "●" : "≈"}</span>
-                    <p>{backendOnline ? "이 사건에는 재생 가능한 영상이 없습니다" : "실제 영상 연결 전 데모 미리보기"}</p>
+                    <span className={`large-marker ${selected.kind}`}>{selected.kind === "person" ? "P" : selected.kind === "vehicle" ? "■" : "≈"}</span>
+                    <p>{backendOnline ? "No playable video is available for this event" : "Demo preview before live video is connected"}</p>
                   </div>
                 )}
                 <span className="camera-label">● {selected.camera}</span>
@@ -295,33 +295,33 @@ export default function Home() {
                 <div className="detail-title">
                   <div>
                     <span>{formatDate(selected.started_at)} · {formatTime(selected.started_at)}</span>
-                    <h2>{kindLabel(selected.kind)} 활동</h2>
+                    <h2>{kindLabel(selected.kind)} activity</h2>
                   </div>
-                  <span className={`priority ${selected.anomaly ? "warn" : "normal"}`}>{selected.anomaly ? "검토 필요" : "일반 활동"}</span>
+                  <span className={`priority ${selected.anomaly ? "warn" : "normal"}`}>{selected.anomaly ? "Review needed" : "Routine activity"}</span>
                 </div>
                 <div className="tags">
                   {Object.entries(selected.labels).map(([label, count]) => <span key={label}>{kindLabel(label)} {count > 1 ? count : ""}</span>)}
-                  {selected.clip_ids.length > 1 && <span>{selected.clip_ids.length}개 영상 병합</span>}
+                  {selected.clip_ids.length > 1 && <span>{selected.clip_ids.length} videos merged</span>}
                 </div>
                 {selected.anomaly_reasons.length > 0 ? (
-                  <div className="reason-box"><strong>이상징후 판단</strong><p>{selected.anomaly_reasons.join(" · ")}</p></div>
+                  <div className="reason-box"><strong>Anomaly assessment</strong><p>{selected.anomaly_reasons.join(" · ")}</p></div>
                 ) : (
-                  <div className="reason-box quiet"><strong>AI 판단</strong><p>사람 또는 동물로 안정적으로 분류된 활동입니다.</p></div>
+                  <div className="reason-box quiet"><strong>AI assessment</strong><p>Activity was consistently classified as a person or moving vehicle.</p></div>
                 )}
                 <div className="viewer-footer">
-                  <span>감지 신뢰도</span>
+                  <span>Detection confidence</span>
                   <div className="score-track"><i style={{ width: `${Math.max(8, selected.score * 100)}%` }} /></div>
                   <strong>{selected.score ? `${Math.round(selected.score * 100)}%` : "—"}</strong>
                 </div>
               </div>
             </>
-          ) : <div className="empty-state">왼쪽에서 사건을 선택하세요.</div>}
+          ) : <div className="empty-state">Select an event from the timeline.</div>}
         </aside>
       </section>
 
       <footer>
-        <span>영상과 Blink 인증정보는 이 컴퓨터에만 저장됩니다.</span>
-        <span>한국시간(KST) · YOLO11n / 검사 주기 · {Math.round((status?.interval_seconds || 300) / 60)}분</span>
+        <span>Videos and Blink credentials remain on this computer.</span>
+        <span>Korea Standard Time (KST) · YOLO11n · Scan interval {Math.round((status?.interval_seconds || 300) / 60)} min</span>
       </footer>
     </main>
   );

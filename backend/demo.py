@@ -16,7 +16,7 @@ def seed_demo(db: Database) -> None:
             "kind": "person",
             "score": 0.94,
             "anomaly": True,
-            "anomaly_reasons": ["짧은 시간 반복 활동"],
+            "anomaly_reasons": ["Repeated activity in a short period"],
             "labels": {"person": 1},
             "clip_ids": [],
             "video_path": None,

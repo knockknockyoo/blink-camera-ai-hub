@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "Blink Camera AI Hub 기존 영상 초기화 및 재분석 준비"
+echo "Resetting existing videos and preparing Blink Camera AI Hub for reanalysis"
 python3 scripts/reset_for_reanalysis.py "$@"
 
-echo "Blink Camera AI Hub를 다시 시작합니다."
+echo "Restarting Blink Camera AI Hub."
 exec bash scripts/run.sh

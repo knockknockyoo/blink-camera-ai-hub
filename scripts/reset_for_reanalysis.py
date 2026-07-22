@@ -29,23 +29,23 @@ def backend_is_running() -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="기존 영상과 분석 결과를 지우고 최근 영상을 다시 분석하도록 준비합니다."
+        description="Remove existing videos and analysis results, then prepare to analyze recent clips again."
     )
     parser.add_argument(
         "--hours",
         type=float,
         default=24,
-        help="다시 다운로드할 시간 범위입니다. 기본값: 24시간",
+        help="Time range to download again. Default: 24 hours.",
     )
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="삭제 확인 질문을 생략합니다.",
+        help="Skip the deletion confirmation prompt.",
     )
     parser.add_argument(
         "--keep-telegram-history",
         action="store_true",
-        help="재분석된 사건을 텔레그램으로 다시 보내지 않습니다.",
+        help="Do not send reanalyzed events to Telegram again.",
     )
     return parser.parse_args()
 
@@ -53,26 +53,26 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.hours <= 0 or args.hours > 72:
-        print("오류: --hours는 0보다 크고 72 이하여야 합니다.")
+        print("Error: --hours must be greater than 0 and no more than 72.")
         return 2
 
     if backend_is_running():
-        print("오류: Blink Camera AI Hub가 실행 중입니다. Ctrl+C로 종료한 후 다시 실행하세요.")
+        print("Error: Blink Camera AI Hub is running. Stop it with Ctrl+C and try again.")
         return 1
 
     if not DB_FILE.exists():
-        print(f"오류: DB 파일을 찾을 수 없습니다: {DB_FILE}")
-        print("BlinkSentinel-M1 폴더 안에서 이 스크립트를 실행하는지 확인하세요.")
+        print(f"Error: Database file not found: {DB_FILE}")
+        print("Run this script from the Blink Camera AI Hub project directory.")
         return 1
 
     if not args.yes:
-        print("기존 raw/rejected/events 영상과 분석 결과를 삭제합니다.")
-        print("Blink 인증, .env, 텔레그램 연결 설정은 보존됩니다.")
+        print("Existing raw, rejected, and event videos and analysis results will be deleted.")
+        print("Blink authentication, .env, and Telegram connection settings will be preserved.")
         if not args.keep_telegram_history:
-            print("재분석에서 다시 검출된 사건은 텔레그램으로 재발송됩니다.")
-        answer = input("계속하려면 yes를 입력하세요: ").strip().lower()
+            print("Events detected again during reanalysis will be sent to Telegram again.")
+        answer = input("Type yes to continue: ").strip().lower()
         if answer != "yes":
-            print("취소했습니다.")
+            print("Cancelled.")
             return 0
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -104,14 +104,14 @@ def main() -> int:
                 path.unlink()
                 deleted += 1
 
-    print(f"완료: 기존 영상 파일 {deleted}개와 분석 기록을 삭제했습니다.")
-    print(f"DB 백업: {backup}")
-    print(f"다음 실행에서 최근 {args.hours:g}시간 영상을 다시 확인합니다.")
+    print(f"Complete: deleted {deleted} existing video files and analysis records.")
+    print(f"Database backup: {backup}")
+    print(f"The next run will scan the most recent {args.hours:g} hours.")
     if args.keep_telegram_history:
-        print("기존 텔레그램 발송 기록을 유지했습니다.")
+        print("Existing Telegram delivery history was preserved.")
     else:
-        print("다시 검출된 알림 대상 사건은 텔레그램으로 재발송됩니다.")
-    print("이제 실행하세요: bash scripts/run.sh")
+        print("Eligible events detected again will be sent to Telegram again.")
+    print("Start now with: bash scripts/run.sh")
     return 0
 
 

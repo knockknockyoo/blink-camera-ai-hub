@@ -16,7 +16,7 @@ async def run(hours: float) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="지정 시간 범위의 Blink 클립을 다시 확인합니다.")
+    parser = argparse.ArgumentParser(description="Scan Blink clips from a specified time range.")
     parser.add_argument("--hours", type=float, default=3)
     args = parser.parse_args()
     asyncio.run(run(args.hours))

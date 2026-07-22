@@ -1,7 +1,5 @@
 # Blink Camera AI Hub
 
-**English** | [한국어](README.ko.md)
-
 Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor cameras and analyzes them locally with AI. It detects people and genuinely moving vehicles, joins related clips into event videos, and delivers the results through a local dashboard and Telegram.
 
 > This is an unofficial open-source project and is not affiliated with Amazon, Blink, or Immedia Semiconductor. Keep camera footage, Blink credentials, and Telegram tokens local. Never commit them to Git.

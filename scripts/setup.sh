@@ -14,28 +14,28 @@ if [[ -z "$python_bin" ]]; then
 fi
 
 if [[ -z "$python_bin" ]]; then
-  echo "Python 3.10~3.13이 필요합니다. Python 3.13 설치를 권장합니다."
+  echo "Python 3.10 through 3.13 is required. Python 3.13 is recommended."
   exit 1
 fi
 
 if [[ -d .venv ]] && ! .venv/bin/python -c 'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 13)))' >/dev/null 2>&1; then
   backup=".venv-incompatible-$(date +%Y%m%d-%H%M%S)"
-  echo "기존 가상환경이 호환되지 않아 $backup 으로 옮깁니다."
+  echo "The existing virtual environment is incompatible and will be moved to $backup."
   mv .venv "$backup"
 fi
 
 if [[ ! -d .venv ]]; then
-  echo "$($python_bin --version)으로 새 가상환경을 만듭니다."
+  echo "Creating a new virtual environment with $($python_bin --version)."
   "$python_bin" -m venv .venv
 fi
 
 if [[ ! -x .venv/bin/python || ! -f .venv/bin/activate ]]; then
-  echo "가상환경 생성에 실패했습니다."
+  echo "Virtual environment creation failed."
   exit 1
 fi
 
 . .venv/bin/activate
-echo "가상환경 준비 완료: $(python --version) ($(command -v python))"
+echo "Virtual environment ready: $(python --version) ($(command -v python))"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 npm ci --ignore-scripts --no-audit --no-fund
@@ -45,5 +45,5 @@ if [[ ! -f .env ]]; then
 fi
 
 echo
-echo "설치 완료. 먼저 데모를 보려면: bash scripts/run.sh"
-echo "Blink 계정을 연결하려면: bash scripts/connect_blink.sh"
+echo "Setup complete. Preview the demo with: bash scripts/run.sh"
+echo "Connect a Blink account with: bash scripts/connect_blink.sh"

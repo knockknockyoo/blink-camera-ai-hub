@@ -46,13 +46,13 @@ class BlinkDownloader:
                     prepared = await item.prepare_download(blink)
                     if not prepared:
                         raise RuntimeError(
-                            "Blink가 다운로드 준비 명령에 응답하지 않았습니다."
+                            "Blink did not respond to the download preparation command."
                         )
                     await item.download_video(blink, str(destination))
                     if not destination.exists() or destination.stat().st_size == 0:
-                        raise RuntimeError("Blink가 빈 영상 파일을 반환했습니다.")
+                        raise RuntimeError("Blink returned an empty video file.")
                 LOGGER.info(
-                    "[다운로드 성공] %s 크기=%d bytes 소요=%.1f초",
+                    "[Download complete] %s size=%d bytes elapsed=%.1fs",
                     destination.name,
                     destination.stat().st_size,
                     time.monotonic() - started_at,
@@ -60,8 +60,8 @@ class BlinkDownloader:
                 return True
             except TimeoutError:
                 error = (
-                    f"Blink 영상 준비·다운로드가 "
-                    f"{self.clip_timeout_seconds:g}초를 초과했습니다."
+                    f"Blink video preparation and download exceeded "
+                    f"{self.clip_timeout_seconds:g} seconds."
                 )
             except Exception as exc:
                 error = str(exc) or type(exc).__name__
@@ -70,8 +70,8 @@ class BlinkDownloader:
             attempt_elapsed = time.monotonic() - attempt_started_at
             if attempt >= self.download_retries:
                 LOGGER.error(
-                    "[다운로드 실패] %s: %d회 시도 후 건너뜀; "
-                    "다음 스캔에서 재시도 (소요=%.1f초, 원인=%s)",
+                    "[Download failed] %s: skipped after %d attempts; "
+                    "will retry next scan (elapsed=%.1fs, reason=%s)",
                     destination.name,
                     attempt,
                     time.monotonic() - started_at,
@@ -80,8 +80,8 @@ class BlinkDownloader:
                 return False
             wait_seconds = self.retry_backoff_seconds * (2 ** (attempt - 1))
             LOGGER.warning(
-                "[다운로드 재시도 %d/%d] %s: %s "
-                "(이번 시도 %.1f초, %d초 후 재시도)",
+                "[Download retry %d/%d] %s: %s "
+                "(attempt elapsed=%.1fs, retrying in %ds)",
                 attempt,
                 self.download_retries,
                 destination.name,
@@ -114,11 +114,11 @@ class BlinkDownloader:
             from blinkpy.blinkpy import Blink
             from blinkpy.helpers.util import json_load
         except ImportError as exc:
-            raise RuntimeError("Blink 연동 패키지가 설치되지 않았습니다.") from exc
+            raise RuntimeError("The Blink integration package is not installed.") from exc
 
         before = {path.resolve() for path in self.download_dir.rglob("*.mp4")}
         since = since or datetime.now(timezone.utc) - timedelta(days=1)
-        LOGGER.info("[스캔] Blink 영상 목록 조회 시작: since=%s", since.isoformat())
+        LOGGER.info("[Scan] Fetching Blink video list: since=%s", since.isoformat())
         async with ClientSession() as session:
             blink = Blink(session=session)
             blink.auth = Auth(
@@ -186,20 +186,20 @@ class BlinkDownloader:
             discovered_count = len(local_items)
             local_items, deferred_count = self._prioritize_local_items(local_items)
             LOGGER.info(
-                "[다운로드] Sync Module 새 영상 %d개 발견; 최신 %d개 처리",
+                "[Download] Found %d new Sync Module clips; processing newest %d",
                 discovered_count,
                 len(local_items),
             )
             if deferred_count:
                 self.incomplete_downloads = True
                 LOGGER.warning(
-                    "[다운로드] 오래된 영상 %d개는 다음 스캔으로 이월",
+                    "[Download] Deferring %d older clips to the next scan",
                     deferred_count,
                 )
             failed_downloads = 0
             for index, (item, destination) in enumerate(local_items, start=1):
                 LOGGER.info(
-                    "[다운로드 %d/%d] 카메라=%s 파일=%s",
+                    "[Download %d/%d] camera=%s file=%s",
                     index,
                     len(local_items),
                     item.name,
@@ -212,7 +212,7 @@ class BlinkDownloader:
 
             if failed_downloads:
                 LOGGER.warning(
-                    "[다운로드] %d개 영상은 Blink 응답 제한으로 건너뜀; 다음 스캔에서 다시 시도",
+                    "[Download] Skipped %d clips due to Blink response limits; retrying next scan",
                     failed_downloads,
                 )
 
@@ -229,15 +229,15 @@ class BlinkDownloader:
                 except Exception as exc:
                     # Local-storage clips already downloaded above must still be
                     # analyzed even when Blink throttles the optional cloud pass.
-                    LOGGER.warning("[Cloud 다운로드] 실패했지만 분석은 계속함: %s", exc)
+                    LOGGER.warning("[Cloud download] Failed, but analysis will continue: %s", exc)
             else:
                 LOGGER.info(
-                    "[Cloud 다운로드] Sync Module 이월 영상이 있어 이번에는 건너뜀"
+                    "[Cloud download] Skipped because deferred Sync Module clips remain"
                 )
             await blink.save(str(self.auth_file))
         after = {path.resolve() for path in self.download_dir.rglob("*.mp4")}
         downloaded = len(after - before)
-        LOGGER.info("[다운로드 완료] 새 영상 %d개", downloaded)
+        LOGGER.info("[Download complete] %d new clips", downloaded)
         return downloaded
 
 
@@ -247,8 +247,8 @@ async def interactive_setup(auth_file: Path) -> None:
     from blinkpy.blinkpy import Blink
 
     auth_file.parent.mkdir(parents=True, exist_ok=True)
-    print("Blink 이메일과 비밀번호는 이 컴퓨터에서만 사용됩니다.")
-    print("2단계 인증 번호가 오면 아래 안내에 따라 입력하세요.\n")
+    print("Your Blink email and password are used only on this computer.")
+    print("Enter the two-factor authentication code when prompted.\n")
     async with ClientSession() as session:
         blink = Blink(session=session)
         try:
@@ -260,4 +260,4 @@ async def interactive_setup(auth_file: Path) -> None:
         auth_file.chmod(0o600)
     except OSError:
         pass
-    print(f"\n인증 완료: {auth_file}")
+    print(f"\nAuthentication complete: {auth_file}")

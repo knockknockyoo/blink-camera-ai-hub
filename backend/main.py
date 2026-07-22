@@ -52,7 +52,7 @@ def status():
 def logs(lines: int = Query(200, ge=1, le=2000)):
     path = settings.data_dir / "logs" / "blink-camera-ai-hub.log"
     if not path.exists():
-        return "아직 로그가 없습니다.\n"
+        return "No logs are available yet.\n"
     return "".join(path.read_text(encoding="utf-8").splitlines(keepends=True)[-lines:])
 
 
@@ -85,12 +85,12 @@ def demo():
 def media(event_id: int):
     match = next((item for item in service.db.list_events(limit=500) if item["id"] == event_id), None)
     if not match or not match.get("video_path"):
-        raise HTTPException(404, "영상 파일이 없습니다.")
+        raise HTTPException(404, "No video file is available.")
     path = Path(match["video_path"]).resolve()
     try:
         path.relative_to(settings.data_dir.resolve())
     except ValueError as exc:
-        raise HTTPException(403, "허용되지 않은 경로입니다.") from exc
+        raise HTTPException(403, "This path is not allowed.") from exc
     if not path.exists():
-        raise HTTPException(404, "영상 파일을 찾을 수 없습니다.")
+        raise HTTPException(404, "The video file could not be found.")
     return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "video/mp4")
