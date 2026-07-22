@@ -144,6 +144,45 @@ class CoreTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_manifest_refresh_does_not_prepare_stored_clips(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                downloader = BlinkDownloader(root / "auth.json", root / "raw")
+
+                class Item:
+                    prepared = False
+
+                    async def prepare_download(self, _blink):
+                        self.prepared = True
+
+                item = Item()
+
+                class SyncModule:
+                    def __init__(self):
+                        self.calls = 0
+                        self._local_storage = {
+                            "status": True,
+                            "manifest_stale": True,
+                            "manifest": [item],
+                        }
+
+                    async def update_local_storage_manifest(self):
+                        self.calls += 1
+                        self._local_storage["manifest_stale"] = False
+                        return True
+
+                sync_module = SyncModule()
+                blink = SimpleNamespace(sync={"Home": sync_module})
+
+                await downloader._refresh_local_storage_manifests(blink)
+
+                self.assertEqual(sync_module.calls, 1)
+                self.assertFalse(item.prepared)
+                self.assertFalse(downloader.incomplete_downloads)
+
+        asyncio.run(run())
+
     def test_cloud_downloads_are_published_from_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -152,6 +152,28 @@ class BlinkDownloader:
         selected = ordered[: self.max_clips_per_scan]
         return selected, len(ordered) - len(selected)
 
+    async def _refresh_local_storage_manifests(self, blink) -> None:
+        """Refresh manifests without preparing every stored clip for download."""
+        for name, sync_module in blink.sync.items():
+            local_state = getattr(sync_module, "_local_storage", None)
+            if not isinstance(local_state, dict) or not local_state.get("status"):
+                continue
+            for attempt in range(1, 4):
+                updated = await self._metadata_stage(
+                    f"Sync Module manifest refresh ({name}, attempt {attempt}/3)",
+                    sync_module.update_local_storage_manifest(),
+                )
+                if updated and not local_state.get("manifest_stale"):
+                    break
+                if attempt < 3:
+                    await asyncio.sleep(3 * attempt)
+            else:
+                self.incomplete_downloads = True
+                LOGGER.warning(
+                    "[Blink metadata] Sync Module manifest remains stale: %s",
+                    name,
+                )
+
     async def download_new(self, since: datetime | None = None) -> int:
         self.incomplete_downloads = False
         self.backlog_remaining = False
@@ -180,31 +202,11 @@ class BlinkDownloader:
             )
             if not started:
                 raise RuntimeError("Blink authentication or platform setup failed.")
-            # Refresh populates each camera's recent_clips from both cloud and
-            # Sync Module local-storage manifests. This is the important path
-            # for free accounts using USB/microSD storage.
-            local_since = since.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
-            for sync_module in blink.sync.values():
-                local_state = getattr(sync_module, "_local_storage", None)
-                if isinstance(local_state, dict) and local_state.get("status"):
-                    local_state["last_manifest_read"] = local_since
-            await self._metadata_stage(
-                "homescreen and Sync Module refresh", blink.refresh(force=True)
-            )
-            # Sync Modules occasionally return code 2102 while rebuilding a
-            # larger manifest. Retry that manifest without redoing login.
-            for sync_module in blink.sync.values():
-                local_state = getattr(sync_module, "_local_storage", None)
-                if not isinstance(local_state, dict) or not local_state.get("status"):
-                    continue
-                for retry in range(3):
-                    if not local_state.get("manifest_stale"):
-                        break
-                    await asyncio.sleep(3 * (retry + 1))
-                    await self._metadata_stage(
-                        f"Sync Module manifest retry {retry + 1}",
-                        sync_module.update_local_storage_manifest(),
-                    )
+            # A full Blink refresh calls check_new_videos(), which prepares every
+            # matching local-storage clip before our batch limit can be applied.
+            # Refresh only the manifest here, then select and prepare the bounded
+            # set of clips below.
+            await self._refresh_local_storage_manifests(blink)
             selected = None if self.camera.lower() == "all" else self.camera.lower()
 
             # BlinkPy's camera.recent_clips intentionally expires items older
