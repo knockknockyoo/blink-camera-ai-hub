@@ -226,6 +226,8 @@ class VideoAnalyzer:
         person_min_box_motion: float = 0.12,
         vehicle_min_box_motion: float = 0.01,
         vehicle_min_sharpness: float = 700.0,
+        device: str | None = None,
+        max_frames: int = 0,
     ):
         self.model_name = model_name
         self.confidence = confidence
@@ -235,6 +237,8 @@ class VideoAnalyzer:
         self.person_min_box_motion = person_min_box_motion
         self.vehicle_min_box_motion = vehicle_min_box_motion
         self.vehicle_min_sharpness = vehicle_min_sharpness
+        self.device = device
+        self.max_frames = max(0, max_frames)
         self._model: Any | None = None
 
     def _load_model(self) -> Any:
@@ -273,6 +277,16 @@ class VideoAnalyzer:
             index += 1
         capture.release()
 
+        if self.max_frames and len(frames) > self.max_frames:
+            selected = {
+                round(index * (len(frames) - 1) / (self.max_frames - 1))
+                for index in range(self.max_frames)
+            } if self.max_frames > 1 else {len(frames) // 2}
+            frames = [frame for index, frame in enumerate(frames) if index in selected]
+            gray_frames = [
+                frame for index, frame in enumerate(gray_frames) if index in selected
+            ]
+
         if not frames:
             return {
                 "duration": duration,
@@ -290,7 +304,13 @@ class VideoAnalyzer:
         motion_score = float(sum(motion_values) / len(motion_values)) if motion_values else 0.0
 
         model = self._load_model()
-        results = model.predict(frames, conf=self.confidence, verbose=False)
+        predict_options: dict[str, Any] = {
+            "conf": self.confidence,
+            "verbose": False,
+        }
+        if self.device:
+            predict_options["device"] = self.device
+        results = model.predict(frames, **predict_options)
         per_frame: list[set[str]] = []
         max_instances: Counter[str] = Counter()
         vehicle_sharpness: dict[str, float] = {}

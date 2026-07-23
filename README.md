@@ -8,7 +8,7 @@ Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor c
 
 - Checks a Blink Sync Module for new clips every five minutes by default
 - Runs download, AI analysis, and Telegram delivery as independent concurrent workers
-- Detects people and moving land vehicles with YOLO; animal detections are ignored
+- Detects people and moving land vehicles with YOLO or optional Moondream2; animal detections are ignored
 - Combines detections across frames with motion and sharpness checks to reduce insect and parked-vehicle false positives
 - Merges only time-correlated clips from the same camera into an event
 - Flags people at night, multiple people, and repeated target activity as anomalies
@@ -87,6 +87,27 @@ docker compose logs -f backend
 
 If no model is present, Ultralytics downloads it during the first analysis. The container restarts after an unexpected exit, while `data/` and `models/` remain on the host. Videos and related database records older than 90 days are cleaned once per day by default. See [DOCKER-M1.md](DOCKER-M1.md) for details.
 
+### Apple GPU analysis with Docker
+
+Docker Desktop cannot expose Apple Metal/MPS to Linux containers. The supported
+GPU layout therefore keeps Blink downloads, SQLite, and Telegram in Docker while
+running Moondream2 as a small native macOS service:
+
+```bash
+bash scripts/install_native_ai.sh
+bash scripts/enable_native_ai_service.sh
+docker compose up -d --build
+curl http://127.0.0.1:8790/health
+curl http://127.0.0.1:8787/api/status
+```
+
+The first native launch downloads the Moondream2 weights from Hugging Face. The
+Docker container submits only a relative path for a video already present in the
+shared `data/` directory; it does not upload the video over the internet.
+Requests are authenticated with a generated local token. Two videos are queued
+concurrently by default, while the native service limits GPU concurrency to
+avoid exhausting unified memory.
+
 ## Test with existing videos
 
 You can analyze an MP4 before connecting a Blink account. Place it under a camera-specific raw directory:
@@ -130,6 +151,12 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `SAMPLE_FPS` | `5` | Number of video frames analyzed per second |
 | `CAMERA_TIMEZONE` | `Asia/Seoul` | Time zone used for camera capture times |
 | `KEEP_UNKNOWN_MOTION` | `false` | Whether to keep unclassified motion events |
+| `NATIVE_AI_URL` | `http://host.docker.internal:8790` | Native macOS AI endpoint used by Docker; empty selects in-process analysis |
+| `AI_PARALLEL_VIDEOS` | `2` | Number of videos submitted to native AI concurrently |
+| `NATIVE_AI_BACKEND` | `moondream2` | Native detector (`moondream2` or `yolo`) |
+| `MOONDREAM_MAX_FRAMES` | `6` | Representative frames analyzed per video |
+| `NATIVE_AI_CONCURRENCY` | `2` | Maximum concurrent native GPU requests |
+| `AI_DEVICE` | `mps` | PyTorch device used by the native service |
 
 `PERSON_MIN_AREA` and `PERSON_MIN_BOX_MOTION` reject small, static person false positives. `VEHICLE_MIN_BOX_MOTION` and `VEHICLE_MIN_SHARPNESS` reduce false alerts from parked vehicles and out-of-focus insects. If distant real subjects are missed, lower these values gradually and test again.
 
@@ -149,6 +176,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Do not attach real 
 - Excessively short polling intervals can trigger Blink or Telegram rate limits.
 - The application can process only recorded motion clips; it cannot reconstruct periods that were never recorded.
 - General-purpose YOLO models are not perfect for every scene. Fine-tuning with representative false-positive samples provides the best accuracy improvement.
+- Moondream2 analyzes representative still frames rather than video natively. Increasing `MOONDREAM_MAX_FRAMES` can improve recall but also increases latency.
 - Treat `data/blink-auth.json` like a password and never expose API port 8787 to the internet.
 - Follow [SECURITY.md](SECURITY.md) when reporting a vulnerability or sharing logs, and redact all account, camera, network, and Sync Module identifiers.
 

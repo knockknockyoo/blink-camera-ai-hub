@@ -18,6 +18,7 @@ from .config import ROOT, Settings
 from .db import Database
 from .events import build_event, concatenate, merge_clips, should_keep
 from .logging_config import configure_logging
+from .remote_analyzer import RemoteVideoAnalyzer
 from .retention import delete_expired_videos
 from .telegram import TelegramNotifier
 
@@ -63,16 +64,33 @@ class MonitorService:
             metadata_timeout_seconds=settings.blink_metadata_timeout_seconds,
             max_clips_per_scan=settings.blink_max_clips_per_scan,
         )
-        self.analyzer = VideoAnalyzer(
-            settings.model_name,
-            settings.confidence,
-            settings.sample_fps,
-            settings.camera_timezone,
-            settings.person_min_area,
-            settings.person_min_box_motion,
-            settings.vehicle_min_box_motion,
-            settings.vehicle_min_sharpness,
-        )
+        if settings.native_ai_url:
+            if not settings.native_ai_token:
+                raise RuntimeError(
+                    "NATIVE_AI_TOKEN is required when NATIVE_AI_URL is configured."
+                )
+            self.analyzer = RemoteVideoAnalyzer(
+                settings.native_ai_url,
+                settings.native_ai_token,
+                settings.data_dir,
+                settings.native_ai_timeout_seconds,
+            )
+            self.ai_backend = "macOS native AI"
+        else:
+            self.analyzer = VideoAnalyzer(
+                settings.model_name,
+                settings.confidence,
+                settings.sample_fps,
+                settings.camera_timezone,
+                settings.person_min_area,
+                settings.person_min_box_motion,
+                settings.vehicle_min_box_motion,
+                settings.vehicle_min_sharpness,
+                device=settings.ai_device or None,
+            )
+            self.ai_backend = (
+                f"local {settings.ai_device}" if settings.ai_device else "local CPU"
+            )
         self.telegram = TelegramNotifier(
             settings.telegram_bot_token,
             settings.telegram_chat_id,
@@ -283,35 +301,96 @@ class MonitorService:
                 file=None,
             )
             analyzed = 0
-            for index, path in enumerate(pending, start=1):
-                self.analysis_progress.update(current=index, file=path.name)
-                LOGGER.info(
-                    "[AI analysis %d/%d] Started: %s", index, len(pending), path.name
+            parallelism = (
+                max(1, self.settings.ai_parallel_videos)
+                if self.settings.native_ai_url
+                else 1
+            )
+            semaphore = asyncio.Semaphore(parallelism)
+
+            jobs = [
+                (path, *infer_metadata(path))
+                for path in pending
+            ]
+            jobs.sort(key=lambda item: item[2])
+
+            async def analyze_path(
+                index: int,
+                path: Path,
+                camera: str,
+                captured_at: datetime,
+            ) -> tuple[int, Path, str, datetime, dict[str, Any]]:
+                async with semaphore:
+                    self.analysis_progress.update(current=index, file=path.name)
+                    LOGGER.info(
+                        "[AI analysis %d/%d] Started: %s",
+                        index,
+                        len(pending),
+                        path.name,
+                    )
+                    result = await asyncio.to_thread(
+                        self.analyzer.analyze, path, captured_at
+                    )
+                    return index, path, camera, captured_at, result
+
+            LOGGER.info(
+                "[AI queue] Processing up to %d videos concurrently via %s",
+                parallelism,
+                self.ai_backend,
+            )
+            tasks = [
+                asyncio.create_task(
+                    analyze_path(index, path, camera, captured_at),
+                    name=f"analyze-{path.name}",
                 )
-                camera, captured_at = infer_metadata(path)
-                result = await asyncio.to_thread(self.analyzer.analyze, path, captured_at)
-                result.update(
-                    {
-                        "path": str(path.resolve()),
-                        "camera": camera,
-                        "captured_at": captured_at.isoformat(),
-                    }
+                for index, (path, camera, captured_at) in enumerate(jobs, start=1)
+            ]
+            failures: list[Exception] = []
+            # Await in capture-time order so Telegram remains chronological.
+            # Later videos still execute concurrently behind the oldest result.
+            try:
+                for task in tasks:
+                    try:
+                        index, path, camera, captured_at, result = await task
+                    except Exception as exc:
+                        failures.append(exc)
+                        LOGGER.error(
+                            "[AI analysis] Video failed and remains queued: %s", exc
+                        )
+                        continue
+                    self.analysis_progress.update(current=index, file=path.name)
+                    result.update(
+                        {
+                            "path": str(path.resolve()),
+                            "camera": camera,
+                            "captured_at": captured_at.isoformat(),
+                        }
+                    )
+                    clip_id = self.db.add_clip(result)
+                    result["id"] = clip_id
+                    self._dirty_cameras.add(camera)
+                    analyzed += 1
+                    LOGGER.info(
+                        "[AI analysis %d/%d] Complete: labels=%s score=%.3f motion=%.4f anomaly=%s",
+                        index,
+                        len(pending),
+                        result.get("labels", {}),
+                        result.get("score", 0),
+                        result.get("motion_score", 0),
+                        result.get("anomaly", False),
+                    )
+                    self._queue_clip_notification(result)
+                    await self._send_pending_notifications()
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            if failures:
+                raise RuntimeError(
+                    f"{len(failures)} of {len(pending)} videos failed AI analysis."
                 )
-                clip_id = self.db.add_clip(result)
-                result["id"] = clip_id
-                self._dirty_cameras.add(camera)
-                analyzed += 1
-                LOGGER.info(
-                    "[AI analysis %d/%d] Complete: labels=%s score=%.3f motion=%.4f anomaly=%s",
-                    index,
-                    len(pending),
-                    result.get("labels", {}),
-                    result.get("score", 0),
-                    result.get("motion_score", 0),
-                    result.get("anomaly", False),
-                )
-                self._queue_clip_notification(result)
-                await self._send_pending_notifications()
 
             still_pending = any(
                 not self.db.clip_exists(path.resolve())
@@ -549,6 +628,12 @@ class MonitorService:
             "notifying": notifying,
             "interval_seconds": self.settings.scan_interval_seconds,
             "analysis_interval_seconds": self.settings.analysis_interval_seconds,
+            "ai_backend": self.ai_backend,
+            "ai_parallel_videos": (
+                max(1, self.settings.ai_parallel_videos)
+                if self.settings.native_ai_url
+                else 1
+            ),
             "last_scan": self.db.get_state("last_scan"),
             "last_error": self.last_error,
             "progress": progress,

@@ -27,6 +27,32 @@ curl http://127.0.0.1:8787/api/health
 
 The `restart: unless-stopped` policy restarts the container after an unexpected process exit.
 
+## Use the Apple GPU
+
+Linux containers cannot access the Mac's Metal/MPS device. Install the native
+Moondream2 service once and let Docker call it through Docker Desktop's host
+gateway:
+
+```bash
+bash scripts/install_native_ai.sh
+bash scripts/enable_native_ai_service.sh
+docker compose up -d --build
+```
+
+Check both services:
+
+```bash
+curl http://127.0.0.1:8790/health
+curl http://127.0.0.1:8787/api/status
+tail -f data/logs/native-ai.log
+```
+
+The native service is managed by `launchd` with `RunAtLoad` and `KeepAlive`.
+It loads Moondream2 on `mps`, accepts only authenticated paths under `data/`,
+and processes up to two video requests concurrently by default. The computer
+still must remain awake; neither Docker nor `launchd` can run while macOS is
+asleep.
+
 ## Stop and restart
 
 ```bash

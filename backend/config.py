@@ -52,6 +52,13 @@ class Settings:
     person_min_box_motion: float = float(os.getenv("PERSON_MIN_BOX_MOTION", "0.06"))
     vehicle_min_box_motion: float = float(os.getenv("VEHICLE_MIN_BOX_MOTION", "0.01"))
     vehicle_min_sharpness: float = float(os.getenv("VEHICLE_MIN_SHARPNESS", "700"))
+    native_ai_url: str = os.getenv("NATIVE_AI_URL", "").rstrip("/")
+    native_ai_token: str = os.getenv("NATIVE_AI_TOKEN", "")
+    native_ai_timeout_seconds: float = float(
+        os.getenv("NATIVE_AI_TIMEOUT_SECONDS", "300")
+    )
+    ai_parallel_videos: int = int(os.getenv("AI_PARALLEL_VIDEOS", "2"))
+    ai_device: str = os.getenv("AI_DEVICE", "")
     camera_timezone: str = os.getenv("CAMERA_TIMEZONE", "Asia/Seoul")
     keep_unknown_motion: bool = _bool("KEEP_UNKNOWN_MOTION", False)
     demo_mode: bool = _bool("DEMO_MODE", False)

@@ -3,9 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 import asyncio
+import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -22,6 +27,7 @@ from backend.blink_client import BlinkDownloader
 from backend.config import Settings
 from backend.events import build_event, clips_are_related, merge_clips, should_keep
 from backend.retention import delete_expired_videos
+from backend.remote_analyzer import RemoteVideoAnalyzer
 from backend.service import MonitorService
 from backend.telegram import TelegramNotifier
 
@@ -42,6 +48,114 @@ def clip(clip_id: int, at: datetime, labels=None, motion=0.01):
 
 
 class CoreTests(unittest.TestCase):
+    def test_remote_analyzer_sends_shared_relative_path(self):
+        class Response(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "raw" / "2" / "clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+            analyzer = RemoteVideoAnalyzer(
+                "http://host.docker.internal:8790",
+                "secret",
+                root,
+                10,
+            )
+            captured_at = datetime.now(timezone.utc)
+            response = Response(
+                json.dumps(
+                    {
+                        "duration": 1,
+                        "labels": {"person": 1},
+                        "score": 1,
+                        "motion_score": 0.2,
+                        "anomaly": False,
+                        "anomaly_reasons": [],
+                    }
+                ).encode()
+            )
+
+            with patch("backend.remote_analyzer.urlopen", return_value=response) as call:
+                result = analyzer.analyze(video, captured_at)
+
+            request = call.call_args.args[0]
+            body = json.loads(request.data)
+            self.assertEqual(body["path"], "raw/2/clip.mp4")
+            self.assertEqual(request.headers["X-ai-token"], "secret")
+            self.assertEqual(result["labels"], {"person": 1})
+
+    def test_service_uses_native_ai_when_url_is_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = MonitorService(
+                Settings(
+                    data_dir=Path(directory),
+                    video_retention_days=0,
+                    native_ai_url="http://host.docker.internal:8790",
+                    native_ai_token="secret",
+                )
+            )
+
+            self.assertIsInstance(service.analyzer, RemoteVideoAnalyzer)
+            self.assertEqual(service.status()["ai_backend"], "macOS native AI")
+
+    def test_native_ai_videos_are_analyzed_concurrently(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="http://host.docker.internal:8790",
+                        native_ai_token="secret",
+                        ai_parallel_videos=2,
+                    )
+                )
+                for name in ("20260723_010000_1.mp4", "20260723_010100_1.mp4"):
+                    path = root / "raw" / "1" / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"video")
+
+                state = {"active": 0, "maximum": 0}
+                lock = threading.Lock()
+
+                class Analyzer:
+                    def analyze(self, _path, _captured_at):
+                        with lock:
+                            state["active"] += 1
+                            state["maximum"] = max(
+                                state["maximum"], state["active"]
+                            )
+                        time.sleep(0.05)
+                        with lock:
+                            state["active"] -= 1
+                        return {
+                            "duration": 1,
+                            "labels": {},
+                            "score": 0,
+                            "motion_score": 0,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                async def skip_event_rebuild():
+                    return None
+
+                service.analyzer = Analyzer()
+                service._finalize_dirty_events = skip_event_rebuild
+                analyzed = await service.analyze_pending()
+
+                self.assertEqual(analyzed, 2)
+                self.assertEqual(state["maximum"], 2)
+
+        asyncio.run(run())
+
     def test_blink_clip_download_retries_transient_failure(self):
         class FlakyItem:
             def __init__(self):
