@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 import asyncio
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,7 +116,12 @@ class CoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            downloader = BlinkDownloader(root / "auth.json", root / "raw")
+            completed = []
+            downloader = BlinkDownloader(
+                root / "auth.json",
+                root / "raw",
+                downloaded_callback=completed.append,
+            )
             item = Item()
             destination = root / "raw" / "clip.mp4"
             destination.parent.mkdir(parents=True)
@@ -127,6 +134,88 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(item.final_was_visible_during_download)
             self.assertEqual(destination.read_bytes(), b"video")
             self.assertFalse(destination.with_suffix(".mp4.part").exists())
+            self.assertEqual(completed, [destination.resolve()])
+
+    def test_downloaded_videos_run_in_parallel_and_notify_immediately(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        ai_worker_count=2,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                videos = [
+                    root / "raw" / "1" / f"20260723_12000{index}_1.mp4"
+                    for index in range(2)
+                ]
+                for video in videos:
+                    video.parent.mkdir(parents=True, exist_ok=True)
+                    video.write_bytes(b"video")
+
+                barrier = threading.Barrier(2)
+                state = {"active": 0, "maximum": 0}
+                state_lock = threading.Lock()
+
+                class Analyzer:
+                    def analyze(self, _path, _captured_at):
+                        with state_lock:
+                            state["active"] += 1
+                            state["maximum"] = max(
+                                state["maximum"], state["active"]
+                            )
+                        barrier.wait(timeout=2)
+                        time.sleep(0.05)
+                        with state_lock:
+                            state["active"] -= 1
+                        return {
+                            "duration": 1,
+                            "labels": {"person": 1},
+                            "score": 0.9,
+                            "motion_score": 0.2,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(Path(event["video_path"]).name)
+                        return True
+
+                async def skip_event_rebuild():
+                    return None
+
+                service.telegram = Telegram()
+                service._finalize_dirty_events = skip_event_rebuild
+                service._running = True
+                workers = [
+                    asyncio.create_task(service._analysis_worker(1, Analyzer())),
+                    asyncio.create_task(service._analysis_worker(2, Analyzer())),
+                ]
+                for video in videos:
+                    service._enqueue_analysis(video)
+
+                await asyncio.wait_for(service._analysis_queue.join(), timeout=3)
+                service._running = False
+                for worker in workers:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+                self.assertEqual(state["maximum"], 2)
+                self.assertEqual(len(delivered), 2)
+                self.assertTrue(
+                    all(service.db.clip_exists(video.resolve()) for video in videos)
+                )
+
+        asyncio.run(run())
 
     def test_blink_metadata_stage_times_out(self):
         async def run():

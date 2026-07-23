@@ -7,7 +7,7 @@ Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor c
 ## Features
 
 - Checks a Blink Sync Module for new clips every five minutes by default
-- Runs download, AI analysis, and Telegram delivery as independent concurrent workers
+- Starts AI analysis immediately after each completed download using a parallel worker pool
 - Detects people and moving land vehicles with YOLO; animal detections are ignored
 - Combines detections across frames with motion and sharpness checks to reduce insect and parked-vehicle false positives
 - Merges only time-correlated clips from the same camera into an event
@@ -59,7 +59,7 @@ Create a bot with Telegram's `@BotFather`. Send `/start` in a private chat with 
 bash scripts/connect_telegram.sh
 ```
 
-The token is hidden while you type and is stored only in the local `.env` file. The AI worker processes completed downloads every five minutes by default. Each relevant result is sent to Telegram immediately after its analysis finishes. Failed notifications remain in a durable queue and are retried automatically. No public URL or router port forwarding is required.
+The token is hidden while you type and is stored only in the local `.env` file. A completed download enters the parallel AI pool immediately. Each relevant result is sent to Telegram as soon as its analysis finishes. Failed notifications remain in a durable queue and are retried automatically. No public URL or router port forwarding is required.
 
 `TELEGRAM_PROTECT_CONTENT=true` limits forwarding and saving of Telegram messages by default. Existing events are skipped during the initial connection, and failed new notifications are retried on a later scan.
 
@@ -101,8 +101,8 @@ Then run `bash scripts/run.sh`. The default YOLO11n model is downloaded automati
 
 1. An independent downloader checks Blink for new clips every five minutes by default.
 2. Each clip is written as a temporary file and atomically published to the durable raw-video queue when complete.
-3. An independent analyzer consumes all completed videos every five minutes while downloads continue separately.
-4. Each relevant result is queued and sent to Telegram immediately after its analysis completes; a third worker retries failed deliveries.
+3. The completed clip is immediately submitted to a pool of independent AI workers while later downloads continue.
+4. Each worker sends a relevant result to Telegram as soon as that individual video finishes; a notifier retries failed deliveries.
 5. Object detections are correlated across sampled frames and checked for box motion and sharpness.
 6. Related activity from the same camera is merged within a two-minute window for the dashboard.
 7. Unimportant source clips are preserved under `data/rejected/` rather than deleted.
@@ -115,7 +115,8 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `SCAN_INTERVAL_SECONDS` | `300` | Interval between checks for new Blink clips |
-| `ANALYSIS_INTERVAL_SECONDS` | `300` | Interval between AI queue-processing runs |
+| `ANALYSIS_INTERVAL_SECONDS` | `300` | Recovery interval for videos left unqueued after a crash or analysis failure |
+| `AI_WORKER_COUNT` | `2` | Number of videos analyzed concurrently with independent model instances |
 | `BLINK_CLIP_TIMEOUT_SECONDS` | `90` | Maximum time one Sync Module clip may block a scan |
 | `BLINK_METADATA_TIMEOUT_SECONDS` | `120` | Maximum time for each Blink login, refresh, or manifest operation |
 | `BLINK_DOWNLOAD_RETRIES` | `1` | Attempts per clip in one scan; failures retry on the next scan |

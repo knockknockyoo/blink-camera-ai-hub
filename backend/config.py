@@ -25,6 +25,7 @@ class Settings:
     analysis_interval_seconds: int = int(
         os.getenv("ANALYSIS_INTERVAL_SECONDS", "300")
     )
+    ai_worker_count: int = int(os.getenv("AI_WORKER_COUNT", "2"))
     merge_window_seconds: int = int(os.getenv("MERGE_WINDOW_SECONDS", "120"))
     video_retention_days: int = int(os.getenv("VIDEO_RETENTION_DAYS", "90"))
     camera_filter: str = os.getenv("BLINK_CAMERA", "all")
