@@ -25,6 +25,7 @@ class BlinkDownloader:
         metadata_timeout_seconds: float = 120.0,
         max_clips_per_scan: int = 20,
         progress_callback: Callable[..., None] | None = None,
+        downloaded_callback: Callable[[Path], None] | None = None,
     ):
         self.auth_file = auth_file
         self.download_dir = download_dir
@@ -36,12 +37,17 @@ class BlinkDownloader:
         self.metadata_timeout_seconds = max(1.0, metadata_timeout_seconds)
         self.max_clips_per_scan = max(0, max_clips_per_scan)
         self.progress_callback = progress_callback
+        self.downloaded_callback = downloaded_callback
         self.incomplete_downloads = False
         self.backlog_remaining = False
 
     def _progress(self, **values: Any) -> None:
         if self.progress_callback:
             self.progress_callback(**values)
+
+    def _downloaded(self, path: Path) -> None:
+        if self.downloaded_callback:
+            self.downloaded_callback(path.resolve())
 
     @property
     def configured(self) -> bool:
@@ -65,6 +71,7 @@ class BlinkDownloader:
                     if not partial.exists() or partial.stat().st_size == 0:
                         raise RuntimeError("Blink returned an empty video file.")
                     partial.replace(destination)
+                    self._downloaded(destination)
                 LOGGER.info(
                     "[Download complete] %s size=%d bytes elapsed=%.1fs",
                     destination.name,
@@ -137,6 +144,7 @@ class BlinkDownloader:
                 source.unlink()
                 continue
             source.replace(destination)
+            self._downloaded(destination)
             published += 1
         return published
 

@@ -25,6 +25,7 @@ from backend.analyzer import (
 from backend.db import Database
 from backend.blink_client import BlinkDownloader
 from backend.config import Settings
+from backend.ensemble_analyzer import EnsembleVideoAnalyzer
 from backend.events import build_event, clips_are_related, merge_clips, should_keep
 from backend.retention import delete_expired_videos
 from backend.remote_analyzer import RemoteVideoAnalyzer
@@ -101,8 +102,12 @@ class CoreTests(unittest.TestCase):
                 )
             )
 
-            self.assertIsInstance(service.analyzer, RemoteVideoAnalyzer)
-            self.assertEqual(service.status()["ai_backend"], "macOS native AI")
+            self.assertIsInstance(service.analyzer, EnsembleVideoAnalyzer)
+            self.assertIsInstance(
+                service.analyzer.analyzers["moondream2"],
+                RemoteVideoAnalyzer,
+            )
+            self.assertEqual(service.status()["ai_backend"], "YOLO + Moondream2")
 
     def test_native_ai_videos_are_analyzed_concurrently(self):
         async def run():
@@ -114,7 +119,7 @@ class CoreTests(unittest.TestCase):
                         video_retention_days=0,
                         native_ai_url="http://host.docker.internal:8790",
                         native_ai_token="secret",
-                        ai_parallel_videos=2,
+                        ai_worker_count=2,
                     )
                 )
                 for name in ("20260723_010000_1.mp4", "20260723_010100_1.mp4"):
@@ -148,11 +153,223 @@ class CoreTests(unittest.TestCase):
                     return None
 
                 service.analyzer = Analyzer()
+                service._new_analyzer = Analyzer
                 service._finalize_dirty_events = skip_event_rebuild
                 analyzed = await service.analyze_pending()
 
                 self.assertEqual(analyzed, 2)
                 self.assertEqual(state["maximum"], 2)
+
+        asyncio.run(run())
+
+    def test_ensemble_runs_models_concurrently_and_accepts_either_positive(self):
+        barrier = threading.Barrier(2)
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+
+        class Analyzer:
+            def __init__(self, labels):
+                self.labels = labels
+
+            def analyze(self, _path, _captured_at):
+                with lock:
+                    state["active"] += 1
+                    state["maximum"] = max(state["maximum"], state["active"])
+                barrier.wait(timeout=2)
+                time.sleep(0.02)
+                with lock:
+                    state["active"] -= 1
+                return {
+                    "duration": 10,
+                    "labels": self.labels,
+                    "score": 0.8 if self.labels else 0.1,
+                    "motion_score": 0.2,
+                    "anomaly": False,
+                    "anomaly_reasons": [],
+                }
+
+        analyzer = EnsembleVideoAnalyzer(
+            Analyzer({}),
+            Analyzer({"person": 2}),
+        )
+        result = analyzer.analyze(
+            Path("clip.mp4"),
+            datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(state["maximum"], 2)
+        self.assertEqual(result["labels"], {"person": 2})
+        self.assertEqual(result["detected_by"], ["moondream2"])
+        self.assertEqual(result["model_votes"]["yolo"]["status"], "negative")
+        self.assertEqual(
+            result["model_votes"]["moondream2"]["status"],
+            "positive",
+        )
+
+    def test_ensemble_keeps_yolo_result_when_moondream_fails(self):
+        class Yolo:
+            def analyze(self, _path, _captured_at):
+                return {
+                    "duration": 4,
+                    "labels": {"motorcycle": 1},
+                    "score": 0.75,
+                    "motion_score": 0.1,
+                    "anomaly": False,
+                    "anomaly_reasons": [],
+                }
+
+        class Moondream:
+            def analyze(self, _path, _captured_at):
+                raise RuntimeError("native service unavailable")
+
+        result = EnsembleVideoAnalyzer(Yolo(), Moondream()).analyze(
+            Path("clip.mp4"),
+            datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(result["labels"], {"motorcycle": 1})
+        self.assertEqual(result["detected_by"], ["yolo"])
+        self.assertEqual(result["model_votes"]["yolo"]["status"], "positive")
+        self.assertEqual(
+            result["model_votes"]["moondream2"]["status"],
+            "error",
+        )
+
+    def test_ensemble_reports_first_positive_while_other_model_is_pending(self):
+        async def run():
+            slow_finished = threading.Event()
+            partial_results = []
+
+            class FastYolo:
+                def analyze(self, _path, _captured_at):
+                    return {
+                        "duration": 4,
+                        "labels": {"person": 1},
+                        "score": 0.8,
+                        "motion_score": 0.1,
+                        "anomaly": False,
+                        "anomaly_reasons": [],
+                    }
+
+            class SlowMoondream:
+                def analyze(self, _path, _captured_at):
+                    time.sleep(0.1)
+                    slow_finished.set()
+                    return {
+                        "duration": 4,
+                        "labels": {},
+                        "score": 0.1,
+                        "motion_score": 0.1,
+                        "anomaly": False,
+                        "anomaly_reasons": [],
+                    }
+
+            async def first_positive(result):
+                self.assertFalse(slow_finished.is_set())
+                partial_results.append(result)
+
+            analyzer = EnsembleVideoAnalyzer(FastYolo(), SlowMoondream())
+            final = await analyzer.analyze_async(
+                Path("clip.mp4"),
+                datetime.now(timezone.utc),
+                first_positive,
+            )
+
+            self.assertEqual(len(partial_results), 1)
+            self.assertEqual(
+                partial_results[0]["model_votes"]["yolo"]["status"],
+                "positive",
+            )
+            self.assertEqual(
+                partial_results[0]["model_votes"]["moondream2"]["status"],
+                "pending",
+            )
+            self.assertEqual(
+                final["model_votes"]["moondream2"]["status"],
+                "negative",
+            )
+
+        asyncio.run(run())
+
+    def test_service_sends_first_vote_then_updates_same_telegram_message(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "raw" / "1" / "20260723_120000_1.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="",
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+
+                class FastYolo:
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 4,
+                            "labels": {"person": 1},
+                            "score": 0.8,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                class SlowMoondream:
+                    def analyze(self, _path, _captured_at):
+                        time.sleep(0.05)
+                        return {
+                            "duration": 4,
+                            "labels": {},
+                            "score": 0.1,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                sent = []
+                edited = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event_message(self, event):
+                        sent.append(event)
+                        return 321
+
+                    async def edit_event_caption(self, message_id, event):
+                        edited.append((message_id, event))
+                        return True
+
+                    async def send_event(self, _event):
+                        raise AssertionError("The video must not be sent twice.")
+
+                service.telegram = Telegram()
+                result = await service._analyze_one(
+                    video,
+                    EnsembleVideoAnalyzer(FastYolo(), SlowMoondream()),
+                )
+
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(
+                    sent[0]["model_votes"]["moondream2"]["status"],
+                    "pending",
+                )
+                self.assertEqual(len(edited), 1)
+                self.assertEqual(edited[0][0], 321)
+                self.assertEqual(
+                    edited[0][1]["model_votes"]["moondream2"]["status"],
+                    "negative",
+                )
+                self.assertEqual(result["labels"], {"person": 1})
+                self.assertEqual(
+                    service.db.list_state("telegram:clip-pending:"),
+                    [],
+                )
 
         asyncio.run(run())
 
@@ -228,7 +445,12 @@ class CoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            downloader = BlinkDownloader(root / "auth.json", root / "raw")
+            completed = []
+            downloader = BlinkDownloader(
+                root / "auth.json",
+                root / "raw",
+                downloaded_callback=completed.append,
+            )
             item = Item()
             destination = root / "raw" / "clip.mp4"
             destination.parent.mkdir(parents=True)
@@ -241,6 +463,88 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(item.final_was_visible_during_download)
             self.assertEqual(destination.read_bytes(), b"video")
             self.assertFalse(destination.with_suffix(".mp4.part").exists())
+            self.assertEqual(completed, [destination.resolve()])
+
+    def test_downloaded_videos_run_in_parallel_and_notify_immediately(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        ai_worker_count=2,
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                videos = [
+                    root / "raw" / "1" / f"20260723_12000{index}_1.mp4"
+                    for index in range(2)
+                ]
+                for video in videos:
+                    video.parent.mkdir(parents=True, exist_ok=True)
+                    video.write_bytes(b"video")
+
+                barrier = threading.Barrier(2)
+                state = {"active": 0, "maximum": 0}
+                state_lock = threading.Lock()
+
+                class Analyzer:
+                    def analyze(self, _path, _captured_at):
+                        with state_lock:
+                            state["active"] += 1
+                            state["maximum"] = max(
+                                state["maximum"], state["active"]
+                            )
+                        barrier.wait(timeout=2)
+                        time.sleep(0.05)
+                        with state_lock:
+                            state["active"] -= 1
+                        return {
+                            "duration": 1,
+                            "labels": {"person": 1},
+                            "score": 0.9,
+                            "motion_score": 0.2,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                delivered = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event(self, event):
+                        delivered.append(Path(event["video_path"]).name)
+                        return True
+
+                async def skip_event_rebuild():
+                    return None
+
+                service.telegram = Telegram()
+                service._finalize_dirty_events = skip_event_rebuild
+                service._running = True
+                workers = [
+                    asyncio.create_task(service._analysis_worker(1, Analyzer())),
+                    asyncio.create_task(service._analysis_worker(2, Analyzer())),
+                ]
+                for video in videos:
+                    service._enqueue_analysis(video)
+
+                await asyncio.wait_for(service._analysis_queue.join(), timeout=3)
+                service._running = False
+                for worker in workers:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+                self.assertEqual(state["maximum"], 2)
+                self.assertEqual(len(delivered), 2)
+                self.assertTrue(
+                    all(service.db.clip_exists(video.resolve()) for video in videos)
+                )
+
+        asyncio.run(run())
 
     def test_blink_metadata_stage_times_out(self):
         async def run():
@@ -896,10 +1200,32 @@ class CoreTests(unittest.TestCase):
                 "started_at": "2026-07-18T01:00:00+00:00",
                 "labels": {"person": 1},
                 "anomaly": True,
+                "model_votes": {
+                    "yolo": {"status": "negative"},
+                    "moondream2": {"status": "positive"},
+                },
             }
         )
         self.assertIn("Person", text)
         self.assertIn("Anomaly", text)
+        self.assertIn("YOLO ❌", text)
+        self.assertIn("Moondream2 ✅", text)
+        self.assertIn("Positive (Moondream2)", text)
+        pending_text = notifier.caption(
+            {
+                "camera": "1",
+                "kind": "person",
+                "started_at": "2026-07-18T01:00:00+00:00",
+                "labels": {"person": 1},
+                "anomaly": False,
+                "model_votes": {
+                    "yolo": {"status": "positive"},
+                    "moondream2": {"status": "pending"},
+                },
+            }
+        )
+        self.assertIn("YOLO ✅", pending_text)
+        self.assertIn("Moondream2 ⏳", pending_text)
 
 
 if __name__ == "__main__":

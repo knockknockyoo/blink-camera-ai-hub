@@ -15,6 +15,16 @@ KIND_NAMES = {
     "motion": "Unclassified motion",
     "vehicle": "Vehicle",
 }
+MODEL_NAMES = {
+    "yolo": "YOLO",
+    "moondream2": "Moondream2",
+}
+MODEL_STATUS = {
+    "positive": "✅",
+    "negative": "❌",
+    "error": "⚠️",
+    "pending": "⏳",
+}
 
 
 class TelegramNotifier:
@@ -44,22 +54,41 @@ class TelegramNotifier:
         )
         anomaly = "\n⚠️ Anomaly detected" if event.get("anomaly") else ""
         details = f"\nDetected: {labels}" if labels else ""
+        votes = event.get("model_votes", {})
+        model_details = ""
+        if votes:
+            statuses = " · ".join(
+                f"{MODEL_NAMES[name]} {MODEL_STATUS.get(votes.get(name, {}).get('status'), '⚠️')}"
+                for name in MODEL_NAMES
+                if name in votes
+            )
+            detected_by = [
+                MODEL_NAMES[name]
+                for name in MODEL_NAMES
+                if votes.get(name, {}).get("status") == "positive"
+            ]
+            decision = (
+                f"Positive ({', '.join(detected_by)})"
+                if detected_by
+                else "Negative"
+            )
+            model_details = f"\nAI: {statuses}\nDecision: {decision}"
         return (
             f"🚨 Blink Camera AI Hub · {kind}\n"
-            f"Camera {event['camera']} · {captured:%Y-%m-%d %H:%M:%S KST}"
-            f"{details}{anomaly}"
+            f"Camera {event['camera']} · {captured:%Y-%m-%d %H:%M:%S %Z}"
+            f"{details}{model_details}{anomaly}"
         )
 
-    async def send_event(self, event: dict) -> bool:
+    async def send_event_message(self, event: dict) -> int | None:
         if not self.configured or not event.get("video_path"):
-            return False
+            return None
         path = Path(event["video_path"])
         if not path.exists():
             LOGGER.error("[Telegram] Video file not found: %s", path)
-            return False
+            return None
         if path.stat().st_size > MAX_VIDEO_BYTES:
             LOGGER.error("[Telegram] Video exceeds 50 MB and will not be sent: %s", path.name)
-            return False
+            return None
 
         form = aiohttp.FormData()
         form.add_field("chat_id", self.chat_id)
@@ -81,13 +110,43 @@ class TelegramNotifier:
                         result = await response.json(content_type=None)
         except Exception:
             LOGGER.exception("[Telegram] Send request failed")
-            return False
+            return None
         if response.status != 200 or not result.get("ok"):
             LOGGER.error(
                 "[Telegram] Send failed: HTTP=%s description=%s",
                 response.status,
                 result.get("description", "unknown"),
             )
-            return False
+            return None
         LOGGER.info("[Telegram] Video sent: %s", path.name)
+        return int(result.get("result", {}).get("message_id", 0))
+
+    async def send_event(self, event: dict) -> bool:
+        return await self.send_event_message(event) is not None
+
+    async def edit_event_caption(self, message_id: int, event: dict) -> bool:
+        if not self.configured or not message_id:
+            return False
+        url = f"https://api.telegram.org/bot{self.bot_token}/editMessageCaption"
+        payload = {
+            "chat_id": self.chat_id,
+            "message_id": message_id,
+            "caption": self.caption(event),
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=payload) as response:
+                    result = await response.json(content_type=None)
+        except Exception:
+            LOGGER.exception("[Telegram] Caption update request failed")
+            return False
+        if response.status != 200 or not result.get("ok"):
+            LOGGER.error(
+                "[Telegram] Caption update failed: HTTP=%s description=%s",
+                response.status,
+                result.get("description", "unknown"),
+            )
+            return False
+        LOGGER.info("[Telegram] Model votes updated for message %s", message_id)
         return True

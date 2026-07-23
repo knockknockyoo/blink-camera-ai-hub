@@ -25,6 +25,7 @@ class Settings:
     analysis_interval_seconds: int = int(
         os.getenv("ANALYSIS_INTERVAL_SECONDS", "300")
     )
+    ai_worker_count: int = int(os.getenv("AI_WORKER_COUNT", "2"))
     merge_window_seconds: int = int(os.getenv("MERGE_WINDOW_SECONDS", "120"))
     video_retention_days: int = int(os.getenv("VIDEO_RETENTION_DAYS", "90"))
     camera_filter: str = os.getenv("BLINK_CAMERA", "all")
@@ -57,7 +58,6 @@ class Settings:
     native_ai_timeout_seconds: float = float(
         os.getenv("NATIVE_AI_TIMEOUT_SECONDS", "300")
     )
-    ai_parallel_videos: int = int(os.getenv("AI_PARALLEL_VIDEOS", "2"))
     ai_device: str = os.getenv("AI_DEVICE", "")
     camera_timezone: str = os.getenv("CAMERA_TIMEZONE", "Asia/Seoul")
     keep_unknown_motion: bool = _bool("KEEP_UNKNOWN_MOTION", False)

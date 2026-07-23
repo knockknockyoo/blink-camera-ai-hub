@@ -15,7 +15,7 @@ docker compose up -d
 
 Existing `data/blink-auth.json`, `data/sentinel.db`, videos, and `.env` settings are preserved. The AI model is downloaded to `models/` during the first analysis and reused afterward. If a model file already exists in the project directory, the `cp` command above avoids downloading it again.
 
-The downloader, AI analyzer, and Telegram retry notifier run as independent workers. A completed download is added to the durable `data/raw` queue immediately. Every five minutes by default, the AI worker processes the completed-video queue while downloads continue separately. Each relevant result is sent to Telegram immediately after its analysis finishes; failed deliveries remain queued across container restarts. Temporary `.part` files are never analyzed.
+The downloader, AI analyzer pool, and Telegram retry notifier run independently. A completed download is atomically added to `data/raw` and submitted to the AI pool immediately while later downloads continue. Two videos are analyzed concurrently by default, each with an independent YOLO instance. When native AI is configured, YOLO and Moondream2 inspect each video at the same time and either validated detection makes the result positive. The first positive model sends the video immediately; the other vote is initially marked pending and the same Telegram caption is updated when it finishes. Failed deliveries remain queued across container restarts. Temporary `.part` files are never analyzed.
 
 ## Status and logs
 

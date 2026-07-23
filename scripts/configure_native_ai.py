@@ -9,7 +9,6 @@ ENV_PATH = ROOT / ".env"
 REQUIRED = {
     "NATIVE_AI_URL": "http://host.docker.internal:8790",
     "NATIVE_AI_TIMEOUT_SECONDS": "300",
-    "AI_PARALLEL_VIDEOS": "2",
     "AI_DEVICE": "mps",
     "NATIVE_AI_BACKEND": "moondream2",
     "MOONDREAM_MODEL_NAME": "vikhyatk/moondream2",

@@ -16,6 +16,7 @@ from .analyzer import VideoAnalyzer
 from .blink_client import BlinkDownloader
 from .config import ROOT, Settings
 from .db import Database
+from .ensemble_analyzer import EnsembleVideoAnalyzer
 from .events import build_event, concatenate, merge_clips, should_keep
 from .logging_config import configure_logging
 from .remote_analyzer import RemoteVideoAnalyzer
@@ -64,33 +65,7 @@ class MonitorService:
             metadata_timeout_seconds=settings.blink_metadata_timeout_seconds,
             max_clips_per_scan=settings.blink_max_clips_per_scan,
         )
-        if settings.native_ai_url:
-            if not settings.native_ai_token:
-                raise RuntimeError(
-                    "NATIVE_AI_TOKEN is required when NATIVE_AI_URL is configured."
-                )
-            self.analyzer = RemoteVideoAnalyzer(
-                settings.native_ai_url,
-                settings.native_ai_token,
-                settings.data_dir,
-                settings.native_ai_timeout_seconds,
-            )
-            self.ai_backend = "macOS native AI"
-        else:
-            self.analyzer = VideoAnalyzer(
-                settings.model_name,
-                settings.confidence,
-                settings.sample_fps,
-                settings.camera_timezone,
-                settings.person_min_area,
-                settings.person_min_box_motion,
-                settings.vehicle_min_box_motion,
-                settings.vehicle_min_sharpness,
-                device=settings.ai_device or None,
-            )
-            self.ai_backend = (
-                f"local {settings.ai_device}" if settings.ai_device else "local CPU"
-            )
+        self.analyzer = self._new_analyzer()
         self.telegram = TelegramNotifier(
             settings.telegram_bot_token,
             settings.telegram_chat_id,
@@ -101,6 +76,11 @@ class MonitorService:
         self._download_lock = asyncio.Lock()
         self._analysis_lock = asyncio.Lock()
         self._notification_lock = asyncio.Lock()
+        self._analysis_queue: asyncio.Queue[Path] = asyncio.Queue()
+        self._queued_paths: set[Path] = set()
+        self._queued_at: dict[Path, float] = {}
+        self._active_analyses = 0
+        self._analysis_completed = 0
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
         self._dirty_cameras: set[str] = set()
@@ -116,6 +96,34 @@ class MonitorService:
         self.analysis_progress: dict[str, Any] = dict(self.download_progress)
         self.notification_progress: dict[str, Any] = dict(self.download_progress)
         self.downloader.progress_callback = self._update_download_progress
+        self.downloader.downloaded_callback = self._enqueue_analysis
+
+    def _new_analyzer(self) -> VideoAnalyzer | EnsembleVideoAnalyzer:
+        yolo = VideoAnalyzer(
+            self.settings.model_name,
+            self.settings.confidence,
+            self.settings.sample_fps,
+            self.settings.camera_timezone,
+            self.settings.person_min_area,
+            self.settings.person_min_box_motion,
+            self.settings.vehicle_min_box_motion,
+            self.settings.vehicle_min_sharpness,
+        )
+        if not self.settings.native_ai_url:
+            self.ai_backend = "YOLO"
+            return yolo
+        if not self.settings.native_ai_token:
+            raise RuntimeError(
+                "NATIVE_AI_TOKEN is required when NATIVE_AI_URL is configured."
+            )
+        moondream2 = RemoteVideoAnalyzer(
+            self.settings.native_ai_url,
+            self.settings.native_ai_token,
+            self.settings.data_dir,
+            self.settings.native_ai_timeout_seconds,
+        )
+        self.ai_backend = "YOLO + Moondream2"
+        return EnsembleVideoAnalyzer(yolo, moondream2)
 
     def _update_download_progress(self, **values: Any) -> None:
         self.download_progress.update(values)
@@ -124,13 +132,29 @@ class MonitorService:
         if self._tasks:
             return
         self._running = True
+        self._enqueue_pending_files()
+        worker_count = max(1, self.settings.ai_worker_count)
+        analyzers = [
+            self.analyzer,
+            *(self._new_analyzer() for _ in range(worker_count - 1)),
+        ]
         self._tasks = [
             asyncio.create_task(self._download_loop(), name="blink-downloader"),
-            asyncio.create_task(self._analysis_loop(), name="video-analyzer"),
             asyncio.create_task(self._notification_loop(), name="telegram-notifier"),
+            asyncio.create_task(
+                self._analysis_recovery_loop(), name="analysis-queue-recovery"
+            ),
+            *(
+                asyncio.create_task(
+                    self._analysis_worker(index, analyzer),
+                    name=f"video-analyzer-{index}",
+                )
+                for index, analyzer in enumerate(analyzers, start=1)
+            ),
         ]
         LOGGER.info(
-            "[Workers] Independent downloader, analyzer, and Telegram notifier started"
+            "[Workers] Downloader, %d parallel AI workers, and Telegram notifier started",
+            worker_count,
         )
 
     async def stop(self) -> None:
@@ -152,6 +176,7 @@ class MonitorService:
             try:
                 await self.download_once()
                 self.last_download_error = None
+                await self._finalize_if_idle()
                 if self.downloader.incomplete_downloads:
                     delay = max(1.0, self.settings.blink_backlog_retry_seconds)
             except Exception as exc:  # Recoverable Blink/network failure.
@@ -172,31 +197,188 @@ class MonitorService:
             )
             await asyncio.sleep(delay)
 
-    async def _analysis_loop(self) -> None:
+    def _enqueue_analysis(self, path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in self._queued_paths or self.db.clip_exists(resolved):
+            return
+        self._queued_paths.add(resolved)
+        self._queued_at[resolved] = time.monotonic()
+        self._analysis_queue.put_nowait(resolved)
+        LOGGER.info(
+            "[AI queue] Added immediately after download: file=%s queued=%d",
+            resolved.name,
+            self._analysis_queue.qsize(),
+        )
+
+    def _enqueue_pending_files(self) -> int:
+        before = self._analysis_queue.qsize()
+        for path in sorted(self.settings.raw_dir.rglob("*.mp4")):
+            self._enqueue_analysis(path)
+        return self._analysis_queue.qsize() - before
+
+    async def _analysis_recovery_loop(self) -> None:
+        """Periodically recover files left unqueued after a crash or failed analysis."""
         delay = max(1.0, float(self.settings.analysis_interval_seconds))
-        LOGGER.info("[Next AI analysis] Starting in %.0fs", delay)
-        await asyncio.sleep(delay)
         while self._running:
-            started_at = time.monotonic()
-            try:
-                await self.analyze_pending()
-                self.last_analysis_error = None
-                self._sync_last_error()
-            except Exception as exc:  # A bad clip must not stop future analysis.
-                self.last_analysis_error = str(exc)
-                self.analysis_progress.update(phase="error", file=str(exc))
-                self._sync_last_error()
-                LOGGER.exception("AI analysis worker failed")
-            elapsed = time.monotonic() - started_at
-            delay = max(
-                1.0, float(self.settings.analysis_interval_seconds) - elapsed
+            await asyncio.sleep(delay)
+            recovered = self._enqueue_pending_files()
+            if recovered:
+                LOGGER.info("[AI queue recovery] Requeued %d videos", recovered)
+
+    async def _analysis_worker(
+        self,
+        worker_id: int,
+        analyzer: VideoAnalyzer | EnsembleVideoAnalyzer,
+    ) -> None:
+        while self._running:
+            path = await self._analysis_queue.get()
+            self._active_analyses += 1
+            self.analysis_progress.update(
+                phase="analyzing",
+                current=self._active_analyses,
+                total=self._active_analyses + self._analysis_queue.qsize(),
+                file=path.name,
             )
             LOGGER.info(
-                "[Next AI analysis] Starting in %.0fs (current analysis %.1fs)",
-                delay,
-                elapsed,
+                "[AI worker %d] Started: file=%s queue_wait=%.2fs queued=%d active=%d",
+                worker_id,
+                path.name,
+                time.monotonic() - self._queued_at.get(path, time.monotonic()),
+                self._analysis_queue.qsize(),
+                self._active_analyses,
             )
-            await asyncio.sleep(delay)
+            try:
+                await self._analyze_one(path, analyzer)
+                self.last_analysis_error = None
+            except Exception as exc:
+                self.last_analysis_error = str(exc)
+                LOGGER.exception(
+                    "[AI worker %d] Failed; recovery scan will retry %s",
+                    worker_id,
+                    path.name,
+                )
+            finally:
+                self._active_analyses -= 1
+                self._queued_paths.discard(path)
+                self._queued_at.pop(path, None)
+                self._analysis_queue.task_done()
+                self._sync_last_error()
+                if not self._active_analyses and self._analysis_queue.empty():
+                    self.analysis_progress.update(
+                        phase="idle", current=0, total=0, file=None
+                    )
+                    await self._finalize_if_idle()
+
+    async def _finalize_if_idle(self) -> None:
+        if (
+            self._dirty_cameras
+            and not self._active_analyses
+            and self._analysis_queue.empty()
+            and not self._download_lock.locked()
+        ):
+            await self._finalize_dirty_events()
+
+    async def _analyze_one(
+        self,
+        path: Path,
+        analyzer: VideoAnalyzer | EnsembleVideoAnalyzer | None = None,
+    ) -> dict[str, Any]:
+        analyzer = analyzer or self.analyzer
+        started_at = time.monotonic()
+        camera, captured_at = infer_metadata(path)
+        direct_sent = False
+        direct_message_id: int | None = None
+        direct_needs_edit = False
+
+        async def send_first_positive(partial: dict[str, Any]) -> None:
+            nonlocal direct_sent, direct_message_id, direct_needs_edit
+            partial.update(
+                {
+                    "id": 0,
+                    "path": str(path.resolve()),
+                    "camera": camera,
+                    "captured_at": captured_at.isoformat(),
+                }
+            )
+            event = self._notification_event(partial)
+            if event is None:
+                return
+            event_key = self._telegram_key(event)
+            if self.db.get_state(event_key):
+                direct_sent = True
+                return
+            async with self._notification_lock:
+                self.notification_progress.update(
+                    phase="notifying", file=event.get("video_path")
+                )
+                direct_message_id = await self.telegram.send_event_message(event)
+                self.notification_progress.update(phase="idle", file=None)
+            if direct_message_id is not None:
+                direct_sent = True
+                direct_needs_edit = any(
+                    vote.get("status") == "pending"
+                    for vote in event.get("model_votes", {}).values()
+                )
+                self.db.set_state(
+                    event_key,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                LOGGER.info(
+                    "[Telegram] First positive model sent immediately: file=%s message=%s",
+                    path.name,
+                    direct_message_id,
+                )
+
+        if isinstance(analyzer, EnsembleVideoAnalyzer):
+            result = await analyzer.analyze_async(
+                path,
+                captured_at,
+                send_first_positive if self.telegram.configured else None,
+            )
+        else:
+            result = await asyncio.to_thread(analyzer.analyze, path, captured_at)
+        result.update(
+            {
+                "path": str(path.resolve()),
+                "camera": camera,
+                "captured_at": captured_at.isoformat(),
+            }
+        )
+        clip_id = self.db.add_clip(result)
+        result["id"] = clip_id
+        self._dirty_cameras.add(camera)
+        self._analysis_completed += 1
+        LOGGER.info(
+            "[AI complete] file=%s elapsed=%.2fs labels=%s models=%s score=%.3f motion=%.4f anomaly=%s",
+            path.name,
+            time.monotonic() - started_at,
+            result.get("labels", {}),
+            {
+                name: vote.get("status")
+                for name, vote in result.get("model_votes", {}).items()
+            },
+            result.get("score", 0),
+            result.get("motion_score", 0),
+            result.get("anomaly", False),
+        )
+        if direct_sent:
+            sent_at = datetime.now(timezone.utc).isoformat()
+            self.db.set_state(f"telegram:clip-sent:{clip_id}", sent_at)
+            final_event = self._notification_event(result)
+            if (
+                direct_needs_edit
+                and direct_message_id
+                and final_event is not None
+            ):
+                async with self._notification_lock:
+                    await self.telegram.edit_event_caption(
+                        direct_message_id,
+                        final_event,
+                    )
+        else:
+            self._queue_clip_notification(result)
+            await self._send_pending_notifications()
+        return result
 
     async def _notification_loop(self) -> None:
         while self._running:
@@ -204,8 +386,6 @@ class MonitorService:
             await asyncio.sleep(5)
 
     async def _send_pending_notifications(self) -> int:
-        if self._notification_lock.locked():
-            return 0
         async with self._notification_lock:
             pending: list[tuple[str, dict[str, Any]]] = []
             for key, value in self.db.list_state("telegram:clip-pending:"):
@@ -221,7 +401,11 @@ class MonitorService:
             sent = 0
             for key, payload in pending:
                 clip_id = int(payload["clip_id"])
-                event = self.db.find_event_for_clip(clip_id) or payload["event"]
+                queued_event = payload["event"]
+                event = self.db.find_event_for_clip(clip_id) or queued_event
+                for field in ("model_votes", "detected_by"):
+                    if field in queued_event:
+                        event[field] = queued_event[field]
                 event_key = self._telegram_key(event)
                 if self.db.get_state(event_key):
                     self.db.delete_state(key)
@@ -284,6 +468,7 @@ class MonitorService:
             return downloaded
 
     async def analyze_pending(self) -> int:
+        """Analyze pending files now; primarily used by maintenance scripts/tests."""
         if self._analysis_lock.locked():
             return 0
         async with self._analysis_lock:
@@ -301,26 +486,22 @@ class MonitorService:
                 file=None,
             )
             analyzed = 0
-            parallelism = (
-                max(1, self.settings.ai_parallel_videos)
-                if self.settings.native_ai_url
-                else 1
-            )
-            semaphore = asyncio.Semaphore(parallelism)
-
-            jobs = [
-                (path, *infer_metadata(path))
-                for path in pending
+            worker_count = max(1, self.settings.ai_worker_count)
+            analyzers = [
+                self.analyzer,
+                *(self._new_analyzer() for _ in range(worker_count - 1)),
             ]
-            jobs.sort(key=lambda item: item[2])
+            jobs: asyncio.Queue[tuple[int, Path]] = asyncio.Queue()
+            for index, path in enumerate(pending, start=1):
+                jobs.put_nowait((index, path))
 
-            async def analyze_path(
-                index: int,
-                path: Path,
-                camera: str,
-                captured_at: datetime,
-            ) -> tuple[int, Path, str, datetime, dict[str, Any]]:
-                async with semaphore:
+            async def run_worker(analyzer: VideoAnalyzer) -> int:
+                completed = 0
+                while not jobs.empty():
+                    try:
+                        index, path = jobs.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
                     self.analysis_progress.update(current=index, file=path.name)
                     LOGGER.info(
                         "[AI analysis %d/%d] Started: %s",
@@ -328,69 +509,20 @@ class MonitorService:
                         len(pending),
                         path.name,
                     )
-                    result = await asyncio.to_thread(
-                        self.analyzer.analyze, path, captured_at
-                    )
-                    return index, path, camera, captured_at, result
-
-            LOGGER.info(
-                "[AI queue] Processing up to %d videos concurrently via %s",
-                parallelism,
-                self.ai_backend,
-            )
-            tasks = [
-                asyncio.create_task(
-                    analyze_path(index, path, camera, captured_at),
-                    name=f"analyze-{path.name}",
-                )
-                for index, (path, camera, captured_at) in enumerate(jobs, start=1)
-            ]
-            failures: list[Exception] = []
-            # Await in capture-time order so Telegram remains chronological.
-            # Later videos still execute concurrently behind the oldest result.
-            try:
-                for task in tasks:
                     try:
-                        index, path, camera, captured_at, result = await task
+                        await self._analyze_one(path, analyzer)
+                        completed += 1
                     except Exception as exc:
-                        failures.append(exc)
-                        LOGGER.error(
-                            "[AI analysis] Video failed and remains queued: %s", exc
-                        )
-                        continue
-                    self.analysis_progress.update(current=index, file=path.name)
-                    result.update(
-                        {
-                            "path": str(path.resolve()),
-                            "camera": camera,
-                            "captured_at": captured_at.isoformat(),
-                        }
-                    )
-                    clip_id = self.db.add_clip(result)
-                    result["id"] = clip_id
-                    self._dirty_cameras.add(camera)
-                    analyzed += 1
-                    LOGGER.info(
-                        "[AI analysis %d/%d] Complete: labels=%s score=%.3f motion=%.4f anomaly=%s",
-                        index,
-                        len(pending),
-                        result.get("labels", {}),
-                        result.get("score", 0),
-                        result.get("motion_score", 0),
-                        result.get("anomaly", False),
-                    )
-                    self._queue_clip_notification(result)
-                    await self._send_pending_notifications()
-            finally:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                        LOGGER.error("[AI analysis] Pending video failed: %s", exc)
+                    finally:
+                        jobs.task_done()
+                return completed
 
-            if failures:
-                raise RuntimeError(
-                    f"{len(failures)} of {len(pending)} videos failed AI analysis."
-                )
+            results = await asyncio.gather(
+                *(run_worker(analyzer) for analyzer in analyzers),
+            )
+            analyzed = sum(results)
+            await self._send_pending_notifications()
 
             still_pending = any(
                 not self.db.clip_exists(path.resolve())
@@ -415,12 +547,9 @@ class MonitorService:
     def _queue_clip_notification(self, clip: dict[str, Any]) -> None:
         if not self.telegram.configured:
             return
-        event = build_event([clip])
-        if not should_keep(event, self.settings.keep_unknown_motion):
+        event = self._notification_event(clip)
+        if event is None:
             return
-        event.pop("source_paths", None)
-        event["camera"] = clip["camera"]
-        event["video_path"] = clip["path"]
         key = f"telegram:clip-pending:{clip['id']}"
         payload = {
             "clip_id": clip["id"],
@@ -434,11 +563,27 @@ class MonitorService:
             Path(clip["path"]).name,
         )
 
+    def _notification_event(
+        self,
+        clip: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        event = build_event([clip])
+        if not should_keep(event, self.settings.keep_unknown_motion):
+            return None
+        event.pop("source_paths", None)
+        event["camera"] = clip["camera"]
+        event["video_path"] = clip["path"]
+        for field in ("model_votes", "detected_by"):
+            if field in clip:
+                event[field] = clip[field]
+        return event
+
     async def scan(self, since_override: datetime | None = None) -> dict[str, int]:
         """Trigger a download scan; the independent AI worker consumes its queue."""
         if self._download_lock.locked():
             return {"downloaded": 0, "analyzed": 0, "events": 0}
         downloaded = await self.download_once(since_override)
+        await self._finalize_if_idle()
         return {
             "downloaded": downloaded,
             "analyzed": 0,
@@ -609,7 +754,7 @@ class MonitorService:
 
     def status(self) -> dict[str, Any]:
         downloading = self._download_lock.locked()
-        analyzing = (
+        analyzing = self._active_analyses > 0 or (
             self._analysis_lock.locked()
             and self.analysis_progress["phase"] != "idle"
         )
@@ -629,11 +774,9 @@ class MonitorService:
             "interval_seconds": self.settings.scan_interval_seconds,
             "analysis_interval_seconds": self.settings.analysis_interval_seconds,
             "ai_backend": self.ai_backend,
-            "ai_parallel_videos": (
-                max(1, self.settings.ai_parallel_videos)
-                if self.settings.native_ai_url
-                else 1
-            ),
+            "ai_worker_count": max(1, self.settings.ai_worker_count),
+            "analysis_queue_size": self._analysis_queue.qsize(),
+            "active_analyses": self._active_analyses,
             "last_scan": self.db.get_state("last_scan"),
             "last_error": self.last_error,
             "progress": progress,
