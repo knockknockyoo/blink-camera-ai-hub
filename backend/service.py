@@ -236,7 +236,19 @@ class MonitorService:
             downloaded = 0
             if self.downloader.configured and not self.settings.demo_mode:
                 last = self.db.get_state("last_scan")
-                since = since_override or (datetime.fromisoformat(last) if last else None)
+                since = since_override
+                if since is None and last:
+                    overlap_seconds = max(
+                        0, self.settings.blink_scan_overlap_seconds
+                    )
+                    since = datetime.fromisoformat(last) - timedelta(
+                        seconds=overlap_seconds
+                    )
+                    LOGGER.info(
+                        "[Download scan] Applying %ds late-arrival overlap: since=%s",
+                        overlap_seconds,
+                        since.isoformat(),
+                    )
                 self.download_progress.update(
                     phase="downloading", current=0, total=0, file=None
                 )

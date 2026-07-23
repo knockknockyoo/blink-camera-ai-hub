@@ -42,6 +42,9 @@ class Settings:
     blink_backlog_retry_seconds: float = float(
         os.getenv("BLINK_BACKLOG_RETRY_SECONDS", "15")
     )
+    blink_scan_overlap_seconds: int = int(
+        os.getenv("BLINK_SCAN_OVERLAP_SECONDS", "900")
+    )
     model_name: str = os.getenv("MODEL_NAME", "yolo11n.pt")
     confidence: float = float(os.getenv("DETECTION_CONFIDENCE", "0.15"))
     sample_fps: float = float(os.getenv("SAMPLE_FPS", "5"))

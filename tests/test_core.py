@@ -252,6 +252,47 @@ class CoreTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_download_scan_overlaps_watermark_for_late_blink_clips(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        blink_scan_overlap_seconds=900,
+                        telegram_bot_token="",
+                        telegram_chat_id="",
+                    )
+                )
+                watermark = datetime(2026, 7, 23, 1, 22, tzinfo=timezone.utc)
+                service.db.set_state("last_scan", watermark.isoformat())
+                requested_since = []
+
+                class Downloader:
+                    configured = True
+                    incomplete_downloads = False
+
+                    async def download_new(self, since):
+                        requested_since.append(since)
+                        return 0
+
+                service.downloader = Downloader()
+
+                self.assertEqual(await service.download_once(), 0)
+                self.assertEqual(
+                    requested_since,
+                    [watermark - timedelta(minutes=15)],
+                )
+                explicit_since = watermark - timedelta(hours=12)
+                self.assertEqual(
+                    await service.download_once(since_override=explicit_since),
+                    0,
+                )
+                self.assertEqual(requested_since[-1], explicit_since)
+
+        asyncio.run(run())
+
     def test_ai_analysis_sends_relevant_result_to_telegram_immediately(self):
         async def run():
             with tempfile.TemporaryDirectory() as directory:
