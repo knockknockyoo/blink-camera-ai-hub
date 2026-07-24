@@ -40,11 +40,12 @@ class MoondreamVideoAnalyzer(VideoAnalyzer):
                 "Apple MPS is unavailable. Run the native AI service with an "
                 "Apple Silicon Python build outside Docker."
             )
+        dtype = torch.float16 if device == "mps" else torch.bfloat16
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             revision="2025-01-09",
             trust_remote_code=True,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             device_map=device,
         )
         self._model.eval()

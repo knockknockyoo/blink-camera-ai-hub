@@ -24,7 +24,7 @@ SETTINGS = Settings()
 TOKEN = os.getenv("NATIVE_AI_TOKEN", "")
 BACKEND = os.getenv("NATIVE_AI_BACKEND", "moondream2").strip().lower()
 DEVICE = os.getenv("AI_DEVICE", "mps").strip().lower()
-MAX_FRAMES = max(1, int(os.getenv("MOONDREAM_MAX_FRAMES", "6")))
+MAX_FRAMES = max(1, int(os.getenv("MOONDREAM_MAX_FRAMES", "4")))
 CONCURRENCY = max(1, int(os.getenv("NATIVE_AI_CONCURRENCY", "1")))
 MODEL_NAME = (
     os.getenv("MOONDREAM_MODEL_NAME", "vikhyatk/moondream2")

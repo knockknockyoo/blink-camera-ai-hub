@@ -158,7 +158,7 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `KEEP_UNKNOWN_MOTION` | `false` | Whether to keep unclassified motion events |
 | `NATIVE_AI_URL` | empty | Native macOS AI endpoint used by Docker; the native installer sets it automatically |
 | `NATIVE_AI_BACKEND` | `moondream2` | Native detector (`moondream2` or `yolo`) |
-| `MOONDREAM_MAX_FRAMES` | `6` | Representative frames analyzed per video |
+| `MOONDREAM_MAX_FRAMES` | `4` | Representative frames analyzed per video; four preserves multi-frame validation on an M1 |
 | `NATIVE_AI_CONCURRENCY` | `1` | Maximum concurrent native GPU requests; use `1` on an 8 GB M1 |
 | `AI_DEVICE` | `mps` | PyTorch device used by the native service |
 
