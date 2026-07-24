@@ -102,7 +102,8 @@ curl http://127.0.0.1:8790/health
 curl http://127.0.0.1:8787/api/status
 ```
 
-The first native launch downloads the Moondream2 weights from Hugging Face. The
+The native installer also installs libvips and downloads the Moondream2 weights
+from Hugging Face during the first launch. The
 Docker container submits only a relative path for a video already present in the
 shared `data/` directory; it does not upload the video over the internet.
 Requests are authenticated with a generated local token. Each video is analyzed

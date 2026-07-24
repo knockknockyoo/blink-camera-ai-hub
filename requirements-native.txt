@@ -1,8 +1,10 @@
 accelerate>=1.10,<2
+einops>=0.8,<1
 fastapi>=0.115,<1
 numpy>=2.0,<3
 opencv-python>=4.10,<5
 Pillow>=11,<13
+pyvips>=3,<4
 python-dotenv>=1.0,<2
 torch>=2.7,<3
 transformers>=4.51.1,<5
