@@ -17,7 +17,7 @@ KIND_NAMES = {
 }
 MODEL_NAMES = {
     "yolo": "YOLO",
-    "moondream2": "Moondream2",
+    "rfdetr": "RF-DETR Small",
 }
 MODEL_STATUS = {
     "positive": "✅",

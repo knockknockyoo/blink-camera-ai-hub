@@ -121,14 +121,16 @@ class MonitorService:
             raise RuntimeError(
                 "NATIVE_AI_TOKEN is required when NATIVE_AI_URL is configured."
             )
-        moondream2 = RemoteVideoAnalyzer(
+        rfdetr = RemoteVideoAnalyzer(
             self.settings.native_ai_url,
             self.settings.native_ai_token,
             self.settings.data_dir,
             self.settings.native_ai_timeout_seconds,
         )
-        self.ai_backend = "YOLO + Moondream2"
-        return EnsembleVideoAnalyzer(yolo, moondream2)
+        self.ai_backend = (
+            f"YOLO + RF-DETR {self.settings.rfdetr_model_size.title()}"
+        )
+        return EnsembleVideoAnalyzer(yolo, rfdetr)
 
     def _update_download_progress(self, **values: Any) -> None:
         self.download_progress.update(values)
@@ -159,7 +161,7 @@ class MonitorService:
         ]
         self._recover_secondary_tasks()
         LOGGER.info(
-            "[Workers] Downloader, %d fast YOLO workers, one durable Moondream2 queue, and Telegram notifier started",
+            "[Workers] Downloader, %d fast YOLO workers, one durable RF-DETR queue, and Telegram notifier started",
             worker_count,
         )
 
@@ -335,17 +337,17 @@ class MonitorService:
         path: Path,
         analyzer: EnsembleVideoAnalyzer,
     ) -> dict[str, Any]:
-        """Finish YOLO immediately and move Moondream2 to its own durable queue."""
+        """Finish YOLO immediately and move RF-DETR to its own durable queue."""
         started_at = time.monotonic()
         camera, captured_at = infer_metadata(path)
         yolo = analyzer.analyzers["yolo"]
         secondary_request = asyncio.create_task(
             self._run_secondary_model(
-                analyzer.analyzers["moondream2"],
+                analyzer.analyzers["rfdetr"],
                 path,
                 captured_at,
             ),
-            name=f"moondream-request-{path.name}",
+            name=f"rfdetr-request-{path.name}",
         )
         try:
             primary = await asyncio.to_thread(yolo.analyze, path, captured_at)
@@ -355,7 +357,7 @@ class MonitorService:
             raise
         votes = {
             "yolo": analyzer._vote(primary),
-            "moondream2": {
+            "rfdetr": {
                 "status": "pending",
                 "labels": {},
                 "score": 0.0,
@@ -384,13 +386,13 @@ class MonitorService:
         )
         self._schedule_secondary(
             payload,
-            analyzer.analyzers["moondream2"],
+            analyzer.analyzers["rfdetr"],
             secondary_request,
         )
         self._analysis_completed += 1
         LOGGER.info(
             "[AI primary complete] file=%s elapsed=%.2fs labels=%s "
-            "models={'yolo': '%s', 'moondream2': 'pending'}",
+            "models={'yolo': '%s', 'rfdetr': 'pending'}",
             path.name,
             time.monotonic() - started_at,
             result.get("labels", {}),
@@ -401,7 +403,7 @@ class MonitorService:
 
     @staticmethod
     def _secondary_state_key(clip_id: int) -> str:
-        return f"ai:moondream:pending:{clip_id}"
+        return f"ai:rfdetr:pending:{clip_id}"
 
     def _schedule_secondary(
         self,
@@ -415,7 +417,7 @@ class MonitorService:
         self._secondary_clip_ids.add(clip_id)
         task = asyncio.create_task(
             self._finish_secondary(payload, analyzer, in_flight),
-            name=f"moondream-{clip_id}",
+            name=f"rfdetr-{clip_id}",
         )
         self._secondary_tasks.add(task)
 
@@ -430,15 +432,15 @@ class MonitorService:
     def _recover_secondary_tasks(self) -> None:
         if not isinstance(self.analyzer, EnsembleVideoAnalyzer):
             return
-        remote = self.analyzer.analyzers["moondream2"]
+        remote = self.analyzer.analyzers["rfdetr"]
         recovered = 0
-        for key, value in self.db.list_state("ai:moondream:pending:"):
+        for key, value in self.db.list_state("ai:rfdetr:pending:"):
             try:
                 payload = json.loads(value)
                 path = Path(payload["path"])
                 clip_id = int(payload["clip_id"])
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                LOGGER.error("[Moondream queue] Removing invalid item: %s", key)
+                LOGGER.error("[RF-DETR queue] Removing invalid item: %s", key)
                 self.db.delete_state(key)
                 continue
             if not path.is_file() or not self.db.clip_exists(path.resolve()):
@@ -448,7 +450,7 @@ class MonitorService:
             recovered += 1
         if recovered:
             LOGGER.info(
-                "[Moondream queue] Recovered %d durable pending videos",
+                "[RF-DETR queue] Recovered %d durable pending videos",
                 recovered,
             )
 
@@ -475,23 +477,23 @@ class MonitorService:
             )
             votes = {
                 "yolo": EnsembleVideoAnalyzer._vote(primary),
-                "moondream2": EnsembleVideoAnalyzer._vote(secondary),
+                "rfdetr": EnsembleVideoAnalyzer._vote(secondary),
             }
             result = EnsembleVideoAnalyzer._combine(
-                {"yolo": primary, "moondream2": secondary},
+                {"yolo": primary, "rfdetr": secondary},
                 votes,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             LOGGER.error(
-                "[Moondream queue] Failed for %s; preserving YOLO result: %s",
+                "[RF-DETR queue] Failed for %s; preserving YOLO result: %s",
                 path.name,
                 exc,
             )
             votes = {
                 "yolo": EnsembleVideoAnalyzer._vote(primary),
-                "moondream2": {
+                "rfdetr": {
                     "status": "error",
                     "labels": {},
                     "score": 0.0,
@@ -1050,7 +1052,7 @@ class MonitorService:
             "ai_worker_count": max(1, self.settings.ai_worker_count),
             "analysis_queue_size": self._analysis_queue.qsize(),
             "active_analyses": self._active_analyses,
-            "moondream_pending": len(self._secondary_tasks),
+            "rfdetr_pending": len(self._secondary_tasks),
             "last_scan": self.db.get_state("last_scan"),
             "last_error": self.last_error,
             "progress": progress,

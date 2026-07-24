@@ -9,16 +9,16 @@ from typing import Any, Awaitable, Callable
 
 
 LOGGER = logging.getLogger("blink-camera-ai-hub")
-MODEL_ORDER = ("yolo", "moondream2")
+MODEL_ORDER = ("yolo", "rfdetr")
 
 
 class EnsembleVideoAnalyzer:
-    """Run YOLO and Moondream2 concurrently and accept either positive result."""
+    """Run YOLO and RF-DETR concurrently and accept either positive result."""
 
-    def __init__(self, yolo: Any, moondream2: Any):
+    def __init__(self, yolo: Any, rfdetr: Any):
         self.analyzers = {
             "yolo": yolo,
-            "moondream2": moondream2,
+            "rfdetr": rfdetr,
         }
 
     @staticmethod

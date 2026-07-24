@@ -15,26 +15,26 @@ from pydantic import BaseModel
 
 from backend.analyzer import VideoAnalyzer
 from backend.config import ROOT, Settings
-from backend.moondream_analyzer import MoondreamVideoAnalyzer
+from backend.rfdetr_analyzer import RFDETRVideoAnalyzer
 
 
 load_dotenv(ROOT / ".env")
 LOGGER = logging.getLogger("blink-camera-ai-hub.native-ai")
 SETTINGS = Settings()
 TOKEN = os.getenv("NATIVE_AI_TOKEN", "")
-BACKEND = os.getenv("NATIVE_AI_BACKEND", "moondream2").strip().lower()
+BACKEND = os.getenv("NATIVE_AI_BACKEND", "rfdetr").strip().lower()
 DEVICE = os.getenv("AI_DEVICE", "mps").strip().lower()
-MAX_FRAMES = max(1, int(os.getenv("MOONDREAM_MAX_FRAMES", "4")))
+MAX_FRAMES = max(1, int(os.getenv("RFDETR_MAX_FRAMES", "8")))
 CONCURRENCY = max(1, int(os.getenv("NATIVE_AI_CONCURRENCY", "1")))
 MODEL_NAME = (
-    os.getenv("MOONDREAM_MODEL_NAME", "vikhyatk/moondream2")
-    if BACKEND == "moondream2"
+    os.getenv("RFDETR_MODEL_SIZE", "small")
+    if BACKEND == "rfdetr"
     else SETTINGS.model_name
 )
 
 
 def build_analyzer() -> VideoAnalyzer:
-    analyzer_type = MoondreamVideoAnalyzer if BACKEND == "moondream2" else VideoAnalyzer
+    analyzer_type = RFDETRVideoAnalyzer if BACKEND == "rfdetr" else VideoAnalyzer
     return analyzer_type(
         MODEL_NAME,
         SETTINGS.confidence,
@@ -45,7 +45,7 @@ def build_analyzer() -> VideoAnalyzer:
         SETTINGS.vehicle_min_box_motion,
         SETTINGS.vehicle_min_sharpness,
         device=DEVICE,
-        max_frames=MAX_FRAMES if BACKEND == "moondream2" else 0,
+        max_frames=MAX_FRAMES if BACKEND == "rfdetr" else 0,
     )
 
 

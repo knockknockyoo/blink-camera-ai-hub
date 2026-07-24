@@ -89,6 +89,7 @@ def main() -> int:
         connection.execute("DELETE FROM events")
         connection.execute("DELETE FROM clips")
         connection.execute("DELETE FROM state WHERE key LIKE 'ai:moondream:%'")
+        connection.execute("DELETE FROM state WHERE key LIKE 'ai:rfdetr:%'")
         if args.resend_telegram:
             connection.execute("DELETE FROM state WHERE key LIKE 'telegram:%'")
         else:

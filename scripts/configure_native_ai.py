@@ -10,9 +10,9 @@ REQUIRED = {
     "NATIVE_AI_URL": "http://host.docker.internal:8790",
     "NATIVE_AI_TIMEOUT_SECONDS": "300",
     "AI_DEVICE": "mps",
-    "NATIVE_AI_BACKEND": "moondream2",
-    "MOONDREAM_MODEL_NAME": "vikhyatk/moondream2",
-    "MOONDREAM_MAX_FRAMES": "4",
+    "NATIVE_AI_BACKEND": "rfdetr",
+    "RFDETR_MODEL_SIZE": "small",
+    "RFDETR_MAX_FRAMES": "8",
     "NATIVE_AI_CONCURRENCY": "1",
     "NATIVE_AI_PORT": "8790",
 }

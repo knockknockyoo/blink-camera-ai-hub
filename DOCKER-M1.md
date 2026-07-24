@@ -15,7 +15,7 @@ docker compose up -d
 
 Existing `data/blink-auth.json`, `data/sentinel.db`, videos, and `.env` settings are preserved. The AI model is downloaded to `models/` during the first analysis and reused afterward. If a model file already exists in the project directory, the `cp` command above avoids downloading it again.
 
-The downloader, fast YOLO pool, durable Moondream2 queue, and Telegram retry notifier run independently. A completed download is atomically added to `data/raw`, and its YOLO and Moondream2 requests start together while later downloads continue. Two videos are analyzed by YOLO concurrently by default, each with an independent model instance. Moondream2 proceeds through its own concurrency-limited GPU queue and either validated model detection makes the final result positive. A YOLO positive sends immediately with Moondream2 marked pending; a later Moondream2 positive can send a YOLO-negative clip. Each unique source filename is delivered to Telegram at most once, so a second positive model only updates the existing caption. Failed deliveries and pending Moondream2 work survive process restarts. Temporary `.part` files are never analyzed.
+The downloader, fast YOLO pool, durable RF-DETR Small queue, and Telegram retry notifier run independently. A completed download is atomically added to `data/raw`, and its YOLO and RF-DETR requests start together while later downloads continue. Two videos are analyzed by YOLO concurrently by default, each with an independent model instance. RF-DETR proceeds through its own concurrency-limited MPS queue and either validated model detection makes the final result positive. A YOLO positive sends immediately with RF-DETR marked pending; a later RF-DETR positive can send a YOLO-negative clip. Each unique source filename is delivered to Telegram at most once, so a second positive model only updates the existing caption. Failed deliveries and pending RF-DETR work survive process restarts. Temporary `.part` files are never analyzed.
 
 ## Status and logs
 
@@ -30,7 +30,7 @@ The `restart: unless-stopped` policy restarts the container after an unexpected 
 ## Use the Apple GPU
 
 Linux containers cannot access the Mac's Metal/MPS device. Install the native
-Moondream2 service once and let Docker call it through Docker Desktop's host
+RF-DETR Small service once and let Docker call it through Docker Desktop's host
 gateway:
 
 ```bash
@@ -48,10 +48,10 @@ tail -f data/logs/native-ai.log
 ```
 
 The native service is managed by `launchd` with `RunAtLoad` and `KeepAlive`.
-It loads Moondream2 on `mps`, accepts only authenticated paths under `data/`,
+It loads RF-DETR Small on `mps`, accepts only authenticated paths under `data/`,
 and processes one GPU request at a time by default to fit an 8 GB M1. The
 backend still analyzes multiple videos concurrently and runs each video's YOLO
-work in parallel with its Moondream2 request. The computer must remain awake;
+work in parallel with its RF-DETR request. The computer must remain awake;
 neither Docker nor `launchd` can run while macOS is asleep.
 
 ## Stop and restart

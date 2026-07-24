@@ -13,10 +13,10 @@ The project depends on third-party software. In particular:
   weights are offered under AGPL-3.0 or a separate Ultralytics enterprise
   license. Model weights are downloaded separately and are not committed to
   this repository.
-- [Moondream2](https://huggingface.co/vikhyatk/moondream2) model code and
-  weights are distributed separately under the Apache License 2.0 according
-  to its model card. They are downloaded to the local Hugging Face cache and
-  are not committed to this repository.
+- [RF-DETR](https://github.com/roboflow/rf-detr) open-source package and
+  Apache-designated model weights are distributed under the Apache License
+  2.0. The RF-DETR Small weights are downloaded to the local Roboflow model
+  cache and are not committed to this repository.
 - FFmpeg is installed by the Docker image and remains subject to the license of
   the particular FFmpeg build and its enabled components.
 

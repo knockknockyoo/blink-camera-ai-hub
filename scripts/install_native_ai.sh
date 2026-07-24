@@ -4,11 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if ! /opt/homebrew/bin/brew list vips >/dev/null 2>&1; then
-  echo "Installing the native libvips dependency for Moondream2."
-  /opt/homebrew/bin/brew install vips
-fi
-
 if [[ ! -x .venv/bin/python ]]; then
   echo "Creating an Apple Silicon Python virtual environment."
   /opt/homebrew/bin/python3.13 -m venv .venv

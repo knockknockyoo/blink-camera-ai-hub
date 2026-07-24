@@ -29,6 +29,7 @@ from backend.ensemble_analyzer import EnsembleVideoAnalyzer
 from backend.events import build_event, clips_are_related, merge_clips, should_keep
 from backend.retention import delete_expired_videos
 from backend.remote_analyzer import RemoteVideoAnalyzer
+from backend.rfdetr_analyzer import RFDETRVideoAnalyzer
 from backend.service import MonitorService
 from backend.telegram import TelegramNotifier
 
@@ -49,6 +50,15 @@ def clip(clip_id: int, at: datetime, labels=None, motion=0.01):
 
 
 class CoreTests(unittest.TestCase):
+    def test_rfdetr_small_model_is_selected_lazily(self):
+        sentinel = object()
+        analyzer = RFDETRVideoAnalyzer("small", 0.15, 5)
+        fake_module = SimpleNamespace(RFDETRSmall=lambda: sentinel)
+
+        with patch.dict("sys.modules", {"rfdetr": fake_module}):
+            self.assertIs(analyzer._load_model(), sentinel)
+            self.assertIs(analyzer._load_model(), sentinel)
+
     def test_remote_analyzer_sends_shared_relative_path(self):
         class Response(BytesIO):
             def __enter__(self):
@@ -104,10 +114,13 @@ class CoreTests(unittest.TestCase):
 
             self.assertIsInstance(service.analyzer, EnsembleVideoAnalyzer)
             self.assertIsInstance(
-                service.analyzer.analyzers["moondream2"],
+                service.analyzer.analyzers["rfdetr"],
                 RemoteVideoAnalyzer,
             )
-            self.assertEqual(service.status()["ai_backend"], "YOLO + Moondream2")
+            self.assertEqual(
+                service.status()["ai_backend"],
+                "YOLO + RF-DETR Small",
+            )
 
     def test_native_ai_videos_are_analyzed_concurrently(self):
         async def run():
@@ -199,14 +212,14 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(state["maximum"], 2)
         self.assertEqual(result["labels"], {"person": 2})
-        self.assertEqual(result["detected_by"], ["moondream2"])
+        self.assertEqual(result["detected_by"], ["rfdetr"])
         self.assertEqual(result["model_votes"]["yolo"]["status"], "negative")
         self.assertEqual(
-            result["model_votes"]["moondream2"]["status"],
+            result["model_votes"]["rfdetr"]["status"],
             "positive",
         )
 
-    def test_ensemble_keeps_yolo_result_when_moondream_fails(self):
+    def test_ensemble_keeps_yolo_result_when_rfdetr_fails(self):
         class Yolo:
             def analyze(self, _path, _captured_at):
                 return {
@@ -218,11 +231,11 @@ class CoreTests(unittest.TestCase):
                     "anomaly_reasons": [],
                 }
 
-        class Moondream:
+        class RFDetr:
             def analyze(self, _path, _captured_at):
                 raise RuntimeError("native service unavailable")
 
-        result = EnsembleVideoAnalyzer(Yolo(), Moondream()).analyze(
+        result = EnsembleVideoAnalyzer(Yolo(), RFDetr()).analyze(
             Path("clip.mp4"),
             datetime.now(timezone.utc),
         )
@@ -231,7 +244,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["detected_by"], ["yolo"])
         self.assertEqual(result["model_votes"]["yolo"]["status"], "positive")
         self.assertEqual(
-            result["model_votes"]["moondream2"]["status"],
+            result["model_votes"]["rfdetr"]["status"],
             "error",
         )
 
@@ -251,7 +264,7 @@ class CoreTests(unittest.TestCase):
                         "anomaly_reasons": [],
                     }
 
-            class SlowMoondream:
+            class SlowRFDetr:
                 def analyze(self, _path, _captured_at):
                     time.sleep(0.1)
                     slow_finished.set()
@@ -268,7 +281,7 @@ class CoreTests(unittest.TestCase):
                 self.assertFalse(slow_finished.is_set())
                 partial_results.append(result)
 
-            analyzer = EnsembleVideoAnalyzer(FastYolo(), SlowMoondream())
+            analyzer = EnsembleVideoAnalyzer(FastYolo(), SlowRFDetr())
             final = await analyzer.analyze_async(
                 Path("clip.mp4"),
                 datetime.now(timezone.utc),
@@ -281,11 +294,11 @@ class CoreTests(unittest.TestCase):
                 "positive",
             )
             self.assertEqual(
-                partial_results[0]["model_votes"]["moondream2"]["status"],
+                partial_results[0]["model_votes"]["rfdetr"]["status"],
                 "pending",
             )
             self.assertEqual(
-                final["model_votes"]["moondream2"]["status"],
+                final["model_votes"]["rfdetr"]["status"],
                 "negative",
             )
 
@@ -319,7 +332,7 @@ class CoreTests(unittest.TestCase):
                             "anomaly_reasons": [],
                         }
 
-                class SlowMoondream:
+                class SlowRFDetr:
                     def analyze(self, _path, _captured_at):
                         time.sleep(0.2)
                         return {
@@ -352,21 +365,21 @@ class CoreTests(unittest.TestCase):
                 started_at = time.monotonic()
                 result = await service._analyze_one(
                     video,
-                    EnsembleVideoAnalyzer(FastYolo(), SlowMoondream()),
+                    EnsembleVideoAnalyzer(FastYolo(), SlowRFDetr()),
                 )
                 primary_elapsed = time.monotonic() - started_at
 
                 self.assertEqual(len(sent), 1)
                 self.assertLess(primary_elapsed, 0.1)
                 self.assertEqual(
-                    sent[0]["model_votes"]["moondream2"]["status"],
+                    sent[0]["model_votes"]["rfdetr"]["status"],
                     "pending",
                 )
                 await asyncio.gather(*list(service._secondary_tasks))
                 self.assertEqual(len(edited), 1)
                 self.assertEqual(edited[0][0], 321)
                 self.assertEqual(
-                    edited[0][1]["model_votes"]["moondream2"]["status"],
+                    edited[0][1]["model_votes"]["rfdetr"]["status"],
                     "positive",
                 )
                 self.assertEqual(len(sent), 1)
@@ -506,7 +519,7 @@ class CoreTests(unittest.TestCase):
                             "anomaly_reasons": [],
                         }
 
-                class Moondream:
+                class RFDetr:
                     def analyze(self, _path, _captured_at):
                         return {
                             "duration": 4,
@@ -532,7 +545,7 @@ class CoreTests(unittest.TestCase):
                 service.telegram = Telegram()
                 primary = await service._analyze_one(
                     video,
-                    EnsembleVideoAnalyzer(Yolo(), Moondream()),
+                    EnsembleVideoAnalyzer(Yolo(), RFDetr()),
                 )
                 self.assertEqual(primary["labels"], {})
                 self.assertEqual(sent, [])
@@ -546,7 +559,7 @@ class CoreTests(unittest.TestCase):
                     "negative",
                 )
                 self.assertEqual(
-                    sent[0]["model_votes"]["moondream2"]["status"],
+                    sent[0]["model_votes"]["rfdetr"]["status"],
                     "positive",
                 )
                 clips = service.db.recent_clips("2")
@@ -1383,15 +1396,15 @@ class CoreTests(unittest.TestCase):
                 "anomaly": True,
                 "model_votes": {
                     "yolo": {"status": "negative"},
-                    "moondream2": {"status": "positive"},
+                    "rfdetr": {"status": "positive"},
                 },
             }
         )
         self.assertIn("Person", text)
         self.assertIn("Anomaly", text)
         self.assertIn("YOLO ❌", text)
-        self.assertIn("Moondream2 ✅", text)
-        self.assertIn("Positive (Moondream2)", text)
+        self.assertIn("RF-DETR Small ✅", text)
+        self.assertIn("Positive (RF-DETR Small)", text)
         pending_text = notifier.caption(
             {
                 "camera": "1",
@@ -1401,12 +1414,12 @@ class CoreTests(unittest.TestCase):
                 "anomaly": False,
                 "model_votes": {
                     "yolo": {"status": "positive"},
-                    "moondream2": {"status": "pending"},
+                    "rfdetr": {"status": "pending"},
                 },
             }
         )
         self.assertIn("YOLO ✅", pending_text)
-        self.assertIn("Moondream2 ⏳", pending_text)
+        self.assertIn("RF-DETR Small ⏳", pending_text)
 
 
 if __name__ == "__main__":
