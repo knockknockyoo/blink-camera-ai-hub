@@ -45,7 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--keep-telegram-history",
         action="store_true",
-        help="Do not send reanalyzed events to Telegram again.",
+        help="Deprecated compatibility option; Telegram history is preserved by default.",
+    )
+    parser.add_argument(
+        "--resend-telegram",
+        action="store_true",
+        help="Explicitly clear delivery history so reanalyzed videos may be sent again.",
     )
     return parser.parse_args()
 
@@ -68,7 +73,7 @@ def main() -> int:
     if not args.yes:
         print("Existing raw, rejected, and event videos and analysis results will be deleted.")
         print("Blink authentication, .env, and Telegram connection settings will be preserved.")
-        if not args.keep_telegram_history:
+        if args.resend_telegram:
             print("Events detected again during reanalysis will be sent to Telegram again.")
         answer = input("Type yes to continue: ").strip().lower()
         if answer != "yes":
@@ -83,8 +88,22 @@ def main() -> int:
     with sqlite3.connect(DB_FILE) as connection:
         connection.execute("DELETE FROM events")
         connection.execute("DELETE FROM clips")
-        if not args.keep_telegram_history:
+        connection.execute("DELETE FROM state WHERE key LIKE 'ai:moondream:%'")
+        if args.resend_telegram:
             connection.execute("DELETE FROM state WHERE key LIKE 'telegram:%'")
+        else:
+            connection.execute(
+                "DELETE FROM state WHERE key LIKE 'telegram:clip-pending:%'"
+            )
+            connection.execute(
+                "DELETE FROM state WHERE key LIKE 'telegram:clip-sent:%'"
+            )
+            connection.execute(
+                "DELETE FROM state WHERE key LIKE 'telegram:clip-message:%'"
+            )
+            connection.execute(
+                "DELETE FROM state WHERE key LIKE 'telegram:file-message:%'"
+            )
         connection.execute(
             """
             INSERT INTO state(key, value) VALUES('last_scan', ?)
@@ -107,10 +126,10 @@ def main() -> int:
     print(f"Complete: deleted {deleted} existing video files and analysis records.")
     print(f"Database backup: {backup}")
     print(f"The next run will scan the most recent {args.hours:g} hours.")
-    if args.keep_telegram_history:
-        print("Existing Telegram delivery history was preserved.")
-    else:
+    if args.resend_telegram:
         print("Eligible events detected again will be sent to Telegram again.")
+    else:
+        print("Telegram delivery history was preserved; identical filenames will not be sent twice.")
     print("Start now with: bash scripts/run.sh")
     return 0
 

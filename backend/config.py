@@ -58,6 +58,7 @@ class Settings:
     native_ai_timeout_seconds: float = float(
         os.getenv("NATIVE_AI_TIMEOUT_SECONDS", "300")
     )
+    native_ai_concurrency: int = int(os.getenv("NATIVE_AI_CONCURRENCY", "1"))
     ai_device: str = os.getenv("AI_DEVICE", "")
     camera_timezone: str = os.getenv("CAMERA_TIMEZONE", "Asia/Seoul")
     keep_unknown_motion: bool = _bool("KEEP_UNKNOWN_MOTION", False)

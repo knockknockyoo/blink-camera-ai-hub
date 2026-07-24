@@ -106,6 +106,31 @@ class Database:
         with self.connect() as conn:
             conn.execute("UPDATE clips SET path = ? WHERE id = ?", (str(path), clip_id))
 
+    def update_clip_analysis(self, clip_id: int, clip: dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE clips
+                SET duration = ?, labels_json = ?, score = ?, motion_score = ?,
+                    anomaly = ?, anomaly_reasons_json = ?, analyzed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    clip.get("duration", 0),
+                    json.dumps(clip.get("labels", {}), ensure_ascii=False),
+                    clip.get("score", 0),
+                    clip.get("motion_score", 0),
+                    int(clip.get("anomaly", False)),
+                    json.dumps(
+                        clip.get("anomaly_reasons", []),
+                        ensure_ascii=False,
+                    ),
+                    now,
+                    clip_id,
+                ),
+            )
+
     def replace_events(self, camera: str, events: list[dict[str, Any]]) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:

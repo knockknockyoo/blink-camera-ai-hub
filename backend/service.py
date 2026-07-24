@@ -83,6 +83,11 @@ class MonitorService:
         self._analysis_completed = 0
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
+        self._secondary_tasks: set[asyncio.Task[None]] = set()
+        self._secondary_clip_ids: set[int] = set()
+        self._secondary_semaphore = asyncio.Semaphore(
+            max(1, settings.native_ai_concurrency)
+        )
         self._dirty_cameras: set[str] = set()
         self.last_download_error: str | None = None
         self.last_analysis_error: str | None = None
@@ -152,8 +157,9 @@ class MonitorService:
                 for index, analyzer in enumerate(analyzers, start=1)
             ),
         ]
+        self._recover_secondary_tasks()
         LOGGER.info(
-            "[Workers] Downloader, %d parallel AI workers, and Telegram notifier started",
+            "[Workers] Downloader, %d fast YOLO workers, one durable Moondream2 queue, and Telegram notifier started",
             worker_count,
         )
 
@@ -164,6 +170,11 @@ class MonitorService:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        for task in self._secondary_tasks:
+            task.cancel()
+        if self._secondary_tasks:
+            await asyncio.gather(*self._secondary_tasks, return_exceptions=True)
+        self._secondary_tasks.clear()
 
     def _sync_last_error(self) -> None:
         self.last_error = self.last_download_error or self.last_analysis_error
@@ -274,6 +285,7 @@ class MonitorService:
             self._dirty_cameras
             and not self._active_analyses
             and self._analysis_queue.empty()
+            and not self._secondary_tasks
             and not self._download_lock.locked()
         ):
             await self._finalize_dirty_events()
@@ -284,59 +296,12 @@ class MonitorService:
         analyzer: VideoAnalyzer | EnsembleVideoAnalyzer | None = None,
     ) -> dict[str, Any]:
         analyzer = analyzer or self.analyzer
+        if isinstance(analyzer, EnsembleVideoAnalyzer):
+            return await self._analyze_primary(path, analyzer)
+
         started_at = time.monotonic()
         camera, captured_at = infer_metadata(path)
-        direct_sent = False
-        direct_message_id: int | None = None
-        direct_needs_edit = False
-
-        async def send_first_positive(partial: dict[str, Any]) -> None:
-            nonlocal direct_sent, direct_message_id, direct_needs_edit
-            partial.update(
-                {
-                    "id": 0,
-                    "path": str(path.resolve()),
-                    "camera": camera,
-                    "captured_at": captured_at.isoformat(),
-                }
-            )
-            event = self._notification_event(partial)
-            if event is None:
-                return
-            event_key = self._telegram_key(event)
-            if self.db.get_state(event_key):
-                direct_sent = True
-                return
-            async with self._notification_lock:
-                self.notification_progress.update(
-                    phase="notifying", file=event.get("video_path")
-                )
-                direct_message_id = await self.telegram.send_event_message(event)
-                self.notification_progress.update(phase="idle", file=None)
-            if direct_message_id is not None:
-                direct_sent = True
-                direct_needs_edit = any(
-                    vote.get("status") == "pending"
-                    for vote in event.get("model_votes", {}).values()
-                )
-                self.db.set_state(
-                    event_key,
-                    datetime.now(timezone.utc).isoformat(),
-                )
-                LOGGER.info(
-                    "[Telegram] First positive model sent immediately: file=%s message=%s",
-                    path.name,
-                    direct_message_id,
-                )
-
-        if isinstance(analyzer, EnsembleVideoAnalyzer):
-            result = await analyzer.analyze_async(
-                path,
-                captured_at,
-                send_first_positive if self.telegram.configured else None,
-            )
-        else:
-            result = await asyncio.to_thread(analyzer.analyze, path, captured_at)
+        result = await asyncio.to_thread(analyzer.analyze, path, captured_at)
         result.update(
             {
                 "path": str(path.resolve()),
@@ -361,24 +326,305 @@ class MonitorService:
             result.get("motion_score", 0),
             result.get("anomaly", False),
         )
-        if direct_sent:
-            sent_at = datetime.now(timezone.utc).isoformat()
-            self.db.set_state(f"telegram:clip-sent:{clip_id}", sent_at)
-            final_event = self._notification_event(result)
-            if (
-                direct_needs_edit
-                and direct_message_id
-                and final_event is not None
-            ):
-                async with self._notification_lock:
-                    await self.telegram.edit_event_caption(
-                        direct_message_id,
-                        final_event,
-                    )
-        else:
-            self._queue_clip_notification(result)
-            await self._send_pending_notifications()
+        self._queue_clip_notification(result)
+        await self._send_pending_notifications()
         return result
+
+    async def _analyze_primary(
+        self,
+        path: Path,
+        analyzer: EnsembleVideoAnalyzer,
+    ) -> dict[str, Any]:
+        """Finish YOLO immediately and move Moondream2 to its own durable queue."""
+        started_at = time.monotonic()
+        camera, captured_at = infer_metadata(path)
+        yolo = analyzer.analyzers["yolo"]
+        secondary_request = asyncio.create_task(
+            self._run_secondary_model(
+                analyzer.analyzers["moondream2"],
+                path,
+                captured_at,
+            ),
+            name=f"moondream-request-{path.name}",
+        )
+        try:
+            primary = await asyncio.to_thread(yolo.analyze, path, captured_at)
+        except Exception:
+            secondary_request.cancel()
+            await asyncio.gather(secondary_request, return_exceptions=True)
+            raise
+        votes = {
+            "yolo": analyzer._vote(primary),
+            "moondream2": {
+                "status": "pending",
+                "labels": {},
+                "score": 0.0,
+            },
+        }
+        result = analyzer._combine({"yolo": primary}, votes)
+        result.update(
+            {
+                "path": str(path.resolve()),
+                "camera": camera,
+                "captured_at": captured_at.isoformat(),
+            }
+        )
+        clip_id = self.db.add_clip(result)
+        result["id"] = clip_id
+        payload = {
+            "clip_id": clip_id,
+            "path": result["path"],
+            "camera": camera,
+            "captured_at": result["captured_at"],
+            "primary_result": primary,
+        }
+        self.db.set_state(
+            self._secondary_state_key(clip_id),
+            json.dumps(payload, ensure_ascii=False),
+        )
+        self._schedule_secondary(
+            payload,
+            analyzer.analyzers["moondream2"],
+            secondary_request,
+        )
+        self._analysis_completed += 1
+        LOGGER.info(
+            "[AI primary complete] file=%s elapsed=%.2fs labels=%s "
+            "models={'yolo': '%s', 'moondream2': 'pending'}",
+            path.name,
+            time.monotonic() - started_at,
+            result.get("labels", {}),
+            votes["yolo"]["status"],
+        )
+        await self._send_initial_model_notification(result)
+        return result
+
+    @staticmethod
+    def _secondary_state_key(clip_id: int) -> str:
+        return f"ai:moondream:pending:{clip_id}"
+
+    def _schedule_secondary(
+        self,
+        payload: dict[str, Any],
+        analyzer: RemoteVideoAnalyzer,
+        in_flight: asyncio.Task[dict[str, Any]] | None = None,
+    ) -> None:
+        clip_id = int(payload["clip_id"])
+        if clip_id in self._secondary_clip_ids:
+            return
+        self._secondary_clip_ids.add(clip_id)
+        task = asyncio.create_task(
+            self._finish_secondary(payload, analyzer, in_flight),
+            name=f"moondream-{clip_id}",
+        )
+        self._secondary_tasks.add(task)
+
+        def completed(done: asyncio.Task[None]) -> None:
+            self._secondary_tasks.discard(done)
+            self._secondary_clip_ids.discard(clip_id)
+            if self._running:
+                asyncio.create_task(self._finalize_if_idle())
+
+        task.add_done_callback(completed)
+
+    def _recover_secondary_tasks(self) -> None:
+        if not isinstance(self.analyzer, EnsembleVideoAnalyzer):
+            return
+        remote = self.analyzer.analyzers["moondream2"]
+        recovered = 0
+        for key, value in self.db.list_state("ai:moondream:pending:"):
+            try:
+                payload = json.loads(value)
+                path = Path(payload["path"])
+                clip_id = int(payload["clip_id"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                LOGGER.error("[Moondream queue] Removing invalid item: %s", key)
+                self.db.delete_state(key)
+                continue
+            if not path.is_file() or not self.db.clip_exists(path.resolve()):
+                self.db.delete_state(key)
+                continue
+            self._schedule_secondary(payload, remote)
+            recovered += 1
+        if recovered:
+            LOGGER.info(
+                "[Moondream queue] Recovered %d durable pending videos",
+                recovered,
+            )
+
+    async def _finish_secondary(
+        self,
+        payload: dict[str, Any],
+        analyzer: RemoteVideoAnalyzer,
+        in_flight: asyncio.Task[dict[str, Any]] | None = None,
+    ) -> None:
+        clip_id = int(payload["clip_id"])
+        path = Path(payload["path"])
+        captured_at = datetime.fromisoformat(payload["captured_at"])
+        primary = payload["primary_result"]
+        started_at = time.monotonic()
+        try:
+            secondary = (
+                await in_flight
+                if in_flight is not None
+                else await self._run_secondary_model(
+                    analyzer,
+                    path,
+                    captured_at,
+                )
+            )
+            votes = {
+                "yolo": EnsembleVideoAnalyzer._vote(primary),
+                "moondream2": EnsembleVideoAnalyzer._vote(secondary),
+            }
+            result = EnsembleVideoAnalyzer._combine(
+                {"yolo": primary, "moondream2": secondary},
+                votes,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "[Moondream queue] Failed for %s; preserving YOLO result: %s",
+                path.name,
+                exc,
+            )
+            votes = {
+                "yolo": EnsembleVideoAnalyzer._vote(primary),
+                "moondream2": {
+                    "status": "error",
+                    "labels": {},
+                    "score": 0.0,
+                },
+            }
+            result = EnsembleVideoAnalyzer._combine({"yolo": primary}, votes)
+
+        result.update(
+            {
+                "id": clip_id,
+                "path": str(path.resolve()),
+                "camera": payload["camera"],
+                "captured_at": payload["captured_at"],
+            }
+        )
+        self.db.update_clip_analysis(clip_id, result)
+        self.db.delete_state(self._secondary_state_key(clip_id))
+        self._dirty_cameras.add(payload["camera"])
+        LOGGER.info(
+            "[AI secondary complete] file=%s elapsed=%.2fs labels=%s "
+            "models=%s",
+            path.name,
+            time.monotonic() - started_at,
+            result.get("labels", {}),
+            {
+                name: vote.get("status")
+                for name, vote in result.get("model_votes", {}).items()
+            },
+        )
+        await self._deliver_final_model_result(result)
+
+    async def _run_secondary_model(
+        self,
+        analyzer: RemoteVideoAnalyzer,
+        path: Path,
+        captured_at: datetime,
+    ) -> dict[str, Any]:
+        async with self._secondary_semaphore:
+            return await asyncio.to_thread(
+                analyzer.analyze,
+                path,
+                captured_at,
+            )
+
+    async def _telegram_send_with_id(
+        self,
+        event: dict[str, Any],
+    ) -> int | None:
+        sender = getattr(self.telegram, "send_event_message", None)
+        if sender is not None:
+            return await sender(event)
+        return 0 if await self.telegram.send_event(event) else None
+
+    async def _send_initial_model_notification(
+        self,
+        clip: dict[str, Any],
+    ) -> None:
+        if not self.telegram.configured:
+            return
+        event = self._notification_event(clip)
+        if event is None:
+            return
+        event_key = self._telegram_key(event)
+        file_key = self._telegram_file_key(event)
+        async with self._notification_lock:
+            if self.db.get_state(file_key) or self.db.get_state(event_key):
+                self.db.set_state(
+                    f"telegram:clip-sent:{clip['id']}",
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                return
+            message_id = await self._telegram_send_with_id(event)
+            if message_id is not None:
+                sent_at = datetime.now(timezone.utc).isoformat()
+                self.db.set_state(
+                    f"telegram:clip-sent:{clip['id']}",
+                    sent_at,
+                )
+                self.db.set_state(file_key, sent_at)
+                self.db.set_state(event_key, sent_at)
+                if message_id:
+                    self.db.set_state(
+                        f"telegram:clip-message:{clip['id']}",
+                        str(message_id),
+                    )
+                    self.db.set_state(
+                        self._telegram_file_message_key(event),
+                        str(message_id),
+                    )
+        if message_id is None:
+            self._queue_clip_notification(clip)
+            return
+        LOGGER.info(
+            "[Telegram] Fast YOLO positive sent immediately: file=%s message=%s",
+            Path(clip["path"]).name,
+            message_id,
+        )
+
+    async def _deliver_final_model_result(
+        self,
+        clip: dict[str, Any],
+    ) -> None:
+        if not self.telegram.configured:
+            return
+        event = self._notification_event(clip)
+        event_key = self._telegram_key(event) if event is not None else None
+        message_value = None
+        if event is not None:
+            message_value = self.db.get_state(
+                self._telegram_file_message_key(event)
+            )
+        message_value = message_value or self.db.get_state(
+            f"telegram:clip-message:{clip['id']}"
+        )
+        if message_value and event is not None:
+            async with self._notification_lock:
+                await self.telegram.edit_event_caption(
+                    int(message_value),
+                    event,
+                )
+            return
+        if event is not None and self.db.get_state(
+            self._telegram_file_key(event)
+        ):
+            return
+        if event_key and self.db.get_state(event_key):
+            return
+        pending_key = f"telegram:clip-pending:{clip['id']}"
+        if event is None:
+            self.db.delete_state(pending_key)
+            return
+        self._queue_clip_notification(clip)
+        await self._send_pending_notifications()
 
     async def _notification_loop(self) -> None:
         while self._running:
@@ -407,7 +653,10 @@ class MonitorService:
                     if field in queued_event:
                         event[field] = queued_event[field]
                 event_key = self._telegram_key(event)
-                if self.db.get_state(event_key):
+                # Delivery uniqueness belongs to the downloaded source clip,
+                # even when the event builder supplies a merged output video.
+                file_key = self._telegram_file_key(queued_event)
+                if self.db.get_state(file_key) or self.db.get_state(event_key):
                     self.db.delete_state(key)
                     continue
                 self.notification_progress.update(
@@ -419,12 +668,23 @@ class MonitorService:
                     event["kind"],
                     Path(event["video_path"]).name,
                 )
-                if not await self.telegram.send_event(event):
+                message_id = await self._telegram_send_with_id(event)
+                if message_id is None:
                     break
                 self.db.delete_state(key)
                 sent_at = datetime.now(timezone.utc).isoformat()
                 self.db.set_state(f"telegram:clip-sent:{clip_id}", sent_at)
+                self.db.set_state(file_key, sent_at)
                 self.db.set_state(event_key, sent_at)
+                if message_id:
+                    self.db.set_state(
+                        f"telegram:clip-message:{clip_id}",
+                        str(message_id),
+                    )
+                    self.db.set_state(
+                        self._telegram_file_message_key(queued_event),
+                        str(message_id),
+                    )
                 sent += 1
             self.notification_progress.update(phase="idle", file=None)
             return sent
@@ -550,6 +810,8 @@ class MonitorService:
         event = self._notification_event(clip)
         if event is None:
             return
+        if self.db.get_state(self._telegram_file_key(event)):
+            return
         key = f"telegram:clip-pending:{clip['id']}"
         payload = {
             "clip_id": clip["id"],
@@ -658,6 +920,17 @@ class MonitorService:
     def _telegram_key(self, event: dict[str, Any]) -> str:
         return f"telegram:{event['camera']}:{event['started_at']}"
 
+    @staticmethod
+    def _telegram_filename(event: dict[str, Any]) -> str:
+        """Return the unique source filename used as the delivery identity."""
+        return Path(event["video_path"]).name
+
+    def _telegram_file_key(self, event: dict[str, Any]) -> str:
+        return f"telegram:file-sent:{self._telegram_filename(event)}"
+
+    def _telegram_file_message_key(self, event: dict[str, Any]) -> str:
+        return f"telegram:file-message:{self._telegram_filename(event)}"
+
     def _initialize_telegram_history(self) -> None:
         if not self.telegram.configured or self.db.get_state("telegram:initialized"):
             return
@@ -754,7 +1027,7 @@ class MonitorService:
 
     def status(self) -> dict[str, Any]:
         downloading = self._download_lock.locked()
-        analyzing = self._active_analyses > 0 or (
+        analyzing = bool(self._secondary_tasks) or self._active_analyses > 0 or (
             self._analysis_lock.locked()
             and self.analysis_progress["phase"] != "idle"
         )
@@ -777,6 +1050,7 @@ class MonitorService:
             "ai_worker_count": max(1, self.settings.ai_worker_count),
             "analysis_queue_size": self._analysis_queue.qsize(),
             "active_analyses": self._active_analyses,
+            "moondream_pending": len(self._secondary_tasks),
             "last_scan": self.db.get_state("last_scan"),
             "last_error": self.last_error,
             "progress": progress,

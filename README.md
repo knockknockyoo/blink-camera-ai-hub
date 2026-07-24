@@ -8,12 +8,12 @@ Blink Camera AI Hub periodically downloads new motion clips from Blink Outdoor c
 
 - Checks a Blink Sync Module for new clips every five minutes by default
 - Starts AI analysis immediately after each completed download using a parallel worker pool
-- Runs YOLO and optional Moondream2 analysis concurrently; either model may confirm a positive detection
+- Runs fast YOLO workers independently from a durable Moondream2 GPU queue; either model may confirm a positive detection
 - Detects people and moving land vehicles; animal detections are ignored
 - Combines detections across frames with motion and sharpness checks to reduce insect and parked-vehicle false positives
 - Merges only time-correlated clips from the same camera into an event
 - Flags people at night, multiple people, and repeated target activity as anomalies
-- Provides a local web dashboard and Telegram MP4 notifications
+- Provides a local web dashboard and Telegram MP4 notifications, with at most one video delivery per unique source filename
 - Stores metadata in SQLite and applies a 90-day default video-retention policy
 - Includes Apple Silicon launchers and a backend-only Docker configuration
 
@@ -60,7 +60,7 @@ Create a bot with Telegram's `@BotFather`. Send `/start` in a private chat with 
 bash scripts/connect_telegram.sh
 ```
 
-The token is hidden while you type and is stored only in the local `.env` file. A completed download enters the parallel AI pool immediately. Each relevant result is sent to Telegram as soon as its analysis finishes. Failed notifications remain in a durable queue and are retried automatically. No public URL or router port forwarding is required.
+The token is hidden while you type and is stored only in the local `.env` file. A completed download enters the parallel AI pool immediately. Each relevant result is sent to Telegram as soon as its analysis finishes. The downloaded source filename is the durable delivery identity: YOLO and Moondream2 can both detect the clip, but Telegram receives the video at most once. The slower model updates the existing message caption with its final vote. Failed notifications remain in a durable queue and are retried automatically. No public URL or router port forwarding is required.
 
 `TELEGRAM_PROTECT_CONTENT=true` limits forwarding and saving of Telegram messages by default. Existing events are skipped during the initial connection, and failed new notifications are retried on a later scan.
 
@@ -106,10 +106,10 @@ The native installer also installs libvips and downloads the Moondream2 weights
 from Hugging Face during the first launch. The
 Docker container submits only a relative path for a video already present in the
 shared `data/` directory; it does not upload the video over the internet.
-Requests are authenticated with a generated local token. Each video is analyzed
-by YOLO in the backend and Moondream2 on the Mac at the same time. Two videos
-are analyzed concurrently by default, while the native service limits GPU
-concurrency to avoid exhausting unified memory.
+Requests are authenticated with a generated local token. Two fast YOLO workers
+analyze downloaded videos without waiting for the slower native queue.
+Moondream2 follows on the Mac, while the native service limits GPU concurrency
+to avoid exhausting unified memory.
 
 ## Test with existing videos
 
@@ -126,8 +126,8 @@ Then run `bash scripts/run.sh`. The default YOLO11n model is downloaded automati
 1. An independent downloader checks Blink for new clips every five minutes by default.
 2. Each clip is written as a temporary file and atomically published to the durable raw-video queue when complete.
 3. The completed clip is immediately submitted to a pool of independent AI workers while later downloads continue.
-4. Each worker runs YOLO and Moondream2 concurrently and treats either validated detection as positive.
-5. The first positive model sends the video immediately with the other vote marked pending; the same Telegram caption is updated when the second model finishes.
+4. For each video, YOLO and Moondream2 start together. Fast YOLO workers save their result without waiting while Moondream2 continues through its separate durable, concurrency-limited GPU queue.
+5. A YOLO positive sends the video immediately with Moondream2 marked pending. A later Moondream2 positive can send a YOLO-negative video. If the video was already sent, only its existing Telegram caption is updated; the unique source filename prevents a second video delivery.
 6. Object detections are correlated across sampled frames and checked for box motion and sharpness.
 7. Related activity from the same camera is merged within a two-minute window for the dashboard.
 8. Unimportant source clips are preserved under `data/rejected/` rather than deleted.
@@ -163,6 +163,8 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `AI_DEVICE` | `mps` | PyTorch device used by the native service |
 
 `PERSON_MIN_AREA` and `PERSON_MIN_BOX_MOTION` reject small, static person false positives. `VEHICLE_MIN_BOX_MOTION` and `VEHICLE_MIN_SHARPNESS` reduce false alerts from parked vehicles and out-of-focus insects. If distant real subjects are missed, lower these values gradually and test again.
+
+`bash scripts/reanalyze.sh --hours 12 --yes` preserves Telegram delivery history by default, so a previously delivered source filename is not sent again. Add `--resend-telegram` only when an intentional duplicate delivery is required.
 
 ## Development and validation
 

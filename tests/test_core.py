@@ -321,11 +321,11 @@ class CoreTests(unittest.TestCase):
 
                 class SlowMoondream:
                     def analyze(self, _path, _captured_at):
-                        time.sleep(0.05)
+                        time.sleep(0.2)
                         return {
                             "duration": 4,
-                            "labels": {},
-                            "score": 0.1,
+                            "labels": {"person": 1},
+                            "score": 0.9,
                             "motion_score": 0.1,
                             "anomaly": False,
                             "anomaly_reasons": [],
@@ -349,27 +349,208 @@ class CoreTests(unittest.TestCase):
                         raise AssertionError("The video must not be sent twice.")
 
                 service.telegram = Telegram()
+                started_at = time.monotonic()
                 result = await service._analyze_one(
                     video,
                     EnsembleVideoAnalyzer(FastYolo(), SlowMoondream()),
                 )
+                primary_elapsed = time.monotonic() - started_at
 
                 self.assertEqual(len(sent), 1)
+                self.assertLess(primary_elapsed, 0.1)
                 self.assertEqual(
                     sent[0]["model_votes"]["moondream2"]["status"],
                     "pending",
                 )
+                await asyncio.gather(*list(service._secondary_tasks))
                 self.assertEqual(len(edited), 1)
                 self.assertEqual(edited[0][0], 321)
                 self.assertEqual(
                     edited[0][1]["model_votes"]["moondream2"]["status"],
-                    "negative",
+                    "positive",
                 )
+                self.assertEqual(len(sent), 1)
                 self.assertEqual(result["labels"], {"person": 1})
                 self.assertEqual(
                     service.db.list_state("telegram:clip-pending:"),
                     [],
                 )
+
+        asyncio.run(run())
+
+    def test_same_filename_is_never_sent_twice(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="",
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+                sent = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event_message(self, event):
+                        sent.append(event)
+                        return 1000 + len(sent)
+
+                service.telegram = Telegram()
+                captured_at = datetime.now(timezone.utc).isoformat()
+
+                def clip(clip_id, camera):
+                    return {
+                        "id": clip_id,
+                        "path": str(
+                            root
+                            / "raw"
+                            / camera
+                            / "20260723_120000_unique.mp4"
+                        ),
+                        "camera": camera,
+                        "captured_at": captured_at,
+                        "duration": 4,
+                        "labels": {"person": 1},
+                        "score": 0.9,
+                        "motion_score": 0.1,
+                        "anomaly": False,
+                        "anomaly_reasons": [],
+                    }
+
+                await asyncio.gather(
+                    service._send_initial_model_notification(clip(1, "1")),
+                    service._send_initial_model_notification(clip(2, "2")),
+                )
+
+                self.assertEqual(len(sent), 1)
+                self.assertIsNotNone(
+                    service.db.get_state(
+                        "telegram:file-sent:20260723_120000_unique.mp4"
+                    )
+                )
+
+        asyncio.run(run())
+
+    def test_models_start_in_parallel_for_each_video(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "raw" / "1" / "20260723_120001_1.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="",
+                    )
+                )
+                barrier = threading.Barrier(2, timeout=1)
+
+                class Analyzer:
+                    def __init__(self, labels):
+                        self.labels = labels
+
+                    def analyze(self, _path, _captured_at):
+                        barrier.wait()
+                        return {
+                            "duration": 4,
+                            "labels": self.labels,
+                            "score": 0.9 if self.labels else 0.1,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                await service._analyze_one(
+                    video,
+                    EnsembleVideoAnalyzer(
+                        Analyzer({"person": 1}),
+                        Analyzer({}),
+                    ),
+                )
+                await asyncio.gather(*list(service._secondary_tasks))
+
+        asyncio.run(run())
+
+    def test_secondary_positive_sends_when_fast_yolo_is_negative(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "raw" / "2" / "20260723_120000_2.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="",
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+
+                class Yolo:
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 4,
+                            "labels": {},
+                            "score": 0.1,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                class Moondream:
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 4,
+                            "labels": {"person": 1},
+                            "score": 1.0,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                sent = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event_message(self, event):
+                        sent.append(event)
+                        return 777
+
+                    async def edit_event_caption(self, _message_id, _event):
+                        raise AssertionError("No provisional message exists.")
+
+                service.telegram = Telegram()
+                primary = await service._analyze_one(
+                    video,
+                    EnsembleVideoAnalyzer(Yolo(), Moondream()),
+                )
+                self.assertEqual(primary["labels"], {})
+                self.assertEqual(sent, [])
+
+                await asyncio.gather(*list(service._secondary_tasks))
+
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0]["labels"], {"person": 1})
+                self.assertEqual(
+                    sent[0]["model_votes"]["yolo"]["status"],
+                    "negative",
+                )
+                self.assertEqual(
+                    sent[0]["model_votes"]["moondream2"]["status"],
+                    "positive",
+                )
+                clips = service.db.recent_clips("2")
+                self.assertEqual(clips[0]["labels"], {"person": 1})
 
         asyncio.run(run())
 
