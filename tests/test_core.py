@@ -29,7 +29,10 @@ from backend.ensemble_analyzer import EnsembleVideoAnalyzer
 from backend.events import build_event, clips_are_related, merge_clips, should_keep
 from backend.retention import delete_expired_videos
 from backend.remote_analyzer import RemoteVideoAnalyzer
-from backend.rfdetr_analyzer import RFDETRVideoAnalyzer
+from backend.rfdetr_analyzer import (
+    RFDETRVideoAnalyzer,
+    deduplicate_frame_detections,
+)
 from backend.service import MonitorService
 from backend.telegram import TelegramNotifier
 
@@ -58,6 +61,25 @@ class CoreTests(unittest.TestCase):
         with patch.dict("sys.modules", {"rfdetr": fake_module}):
             self.assertIs(analyzer._load_model(), sentinel)
             self.assertIs(analyzer._load_model(), sentinel)
+
+    def test_rfdetr_overlapping_boxes_are_counted_once(self):
+        detections = [
+            ("person", [100, 100, 300, 500], 0.91),
+            ("person", [110, 105, 305, 505], 0.75),
+            ("person", [600, 100, 800, 500], 0.82),
+            ("bicycle", [100, 100, 300, 500], 0.88),
+        ]
+
+        kept = deduplicate_frame_detections(detections)
+
+        self.assertEqual(
+            [(label, score) for label, _box, score in kept],
+            [
+                ("person", 0.91),
+                ("bicycle", 0.88),
+                ("person", 0.82),
+            ],
+        )
 
     def test_remote_analyzer_sends_shared_relative_path(self):
         class Response(BytesIO):

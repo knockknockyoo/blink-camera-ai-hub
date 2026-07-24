@@ -60,7 +60,10 @@ class Settings:
     )
     native_ai_concurrency: int = int(os.getenv("NATIVE_AI_CONCURRENCY", "1"))
     rfdetr_model_size: str = os.getenv("RFDETR_MODEL_SIZE", "small")
-    rfdetr_max_frames: int = int(os.getenv("RFDETR_MAX_FRAMES", "16"))
+    rfdetr_max_frames: int = int(os.getenv("RFDETR_MAX_FRAMES", "14"))
+    rfdetr_vehicle_min_box_motion: float = float(
+        os.getenv("RFDETR_VEHICLE_MIN_BOX_MOTION", "0.03")
+    )
     ai_device: str = os.getenv("AI_DEVICE", "")
     camera_timezone: str = os.getenv("CAMERA_TIMEZONE", "Asia/Seoul")
     keep_unknown_motion: bool = _bool("KEEP_UNKNOWN_MOTION", False)

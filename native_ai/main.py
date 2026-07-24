@@ -24,7 +24,7 @@ SETTINGS = Settings()
 TOKEN = os.getenv("NATIVE_AI_TOKEN", "")
 BACKEND = os.getenv("NATIVE_AI_BACKEND", "rfdetr").strip().lower()
 DEVICE = os.getenv("AI_DEVICE", "mps").strip().lower()
-MAX_FRAMES = max(1, int(os.getenv("RFDETR_MAX_FRAMES", "16")))
+MAX_FRAMES = max(1, int(os.getenv("RFDETR_MAX_FRAMES", "14")))
 CONCURRENCY = max(1, int(os.getenv("NATIVE_AI_CONCURRENCY", "1")))
 MODEL_NAME = (
     os.getenv("RFDETR_MODEL_SIZE", "small")
@@ -42,7 +42,11 @@ def build_analyzer() -> VideoAnalyzer:
         SETTINGS.camera_timezone,
         SETTINGS.person_min_area,
         SETTINGS.person_min_box_motion,
-        SETTINGS.vehicle_min_box_motion,
+        (
+            SETTINGS.rfdetr_vehicle_min_box_motion
+            if BACKEND == "rfdetr"
+            else SETTINGS.vehicle_min_box_motion
+        ),
         SETTINGS.vehicle_min_sharpness,
         device=DEVICE,
         max_frames=MAX_FRAMES if BACKEND == "rfdetr" else 0,

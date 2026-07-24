@@ -13,9 +13,31 @@ from .analyzer import (
     credible_person_detection,
     credible_vehicle_detection,
     detection_sharpness,
+    box_iou,
     label_is_supported,
     moving_detection_track,
 )
+
+
+def deduplicate_frame_detections(
+    detections: list[tuple[str, list[float], float]],
+    iou_threshold: float = 0.4,
+) -> list[tuple[str, list[float], float]]:
+    """Keep the strongest box when one object produces overlapping detections."""
+    kept: list[tuple[str, list[float], float]] = []
+    for candidate in sorted(
+        detections,
+        key=lambda item: item[2],
+        reverse=True,
+    ):
+        label, box, _ = candidate
+        if any(
+            label == kept_label and box_iou(box, kept_box) >= iou_threshold
+            for kept_label, kept_box, _ in kept
+        ):
+            continue
+        kept.append(candidate)
+    return kept
 
 
 class RFDETRVideoAnalyzer(VideoAnalyzer):
@@ -60,7 +82,7 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
         source_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         duration = source_count / fps if fps else 0.0
-        target_count = max(1, self.max_frames or 16)
+        target_count = max(1, self.max_frames or 14)
         indexes = {
             round(index * max(0, source_count - 1) / max(1, target_count - 1))
             for index in range(min(target_count, max(1, source_count)))
@@ -125,7 +147,7 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
             confidences = frame_detections.confidence
             if confidences is None:
                 confidences = [1.0] * len(frame_detections.xyxy)
-            frame_labels: list[str] = []
+            accepted: list[tuple[str, list[float], float]] = []
             for box, raw_label, confidence in zip(
                 frame_detections.xyxy.tolist(),
                 list(names),
@@ -153,6 +175,10 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
                     self.vehicle_min_box_motion,
                 ):
                     continue
+                accepted.append((label, box, float(confidence)))
+
+            frame_labels: list[str] = []
+            for label, box, confidence in deduplicate_frame_detections(accepted):
                 if label in VEHICLES:
                     vehicle_sharpness[label] = max(
                         vehicle_sharpness.get(label, 0.0),
@@ -162,7 +188,7 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
                 detection_boxes.setdefault(label, []).append(
                     (frame_index, box)
                 )
-                max_confidence = max(max_confidence, float(confidence))
+                max_confidence = max(max_confidence, confidence)
             for label, count in Counter(frame_labels).items():
                 max_instances[label] = max(max_instances[label], count)
             per_frame.append(set(frame_labels))
