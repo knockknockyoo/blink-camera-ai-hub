@@ -166,7 +166,11 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 
 `PERSON_MIN_AREA` and `PERSON_MIN_BOX_MOTION` reject small, static person false positives. `VEHICLE_MIN_BOX_MOTION` and `VEHICLE_MIN_SHARPNESS` reduce false alerts from parked vehicles and out-of-focus insects. If distant real subjects are missed, lower these values gradually and test again.
 
-`bash scripts/reanalyze.sh --hours 12 --yes` preserves Telegram delivery history by default, so a previously delivered source filename is not sent again. Add `--resend-telegram` only when an intentional duplicate delivery is required.
+`bash scripts/reanalyze.sh --hours 12 --yes` clears Telegram delivery history so
+eligible videos can be delivered again during validation. Filename-based
+deduplication still prevents the same source video from being sent twice during
+that run. Add `--keep-telegram-history` when previously delivered filenames
+must remain suppressed.
 
 ## Development and validation
 

@@ -45,12 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--keep-telegram-history",
         action="store_true",
-        help="Deprecated compatibility option; Telegram history is preserved by default.",
+        help="Preserve delivery history so previously sent filenames are not sent again.",
     )
     parser.add_argument(
         "--resend-telegram",
         action="store_true",
-        help="Explicitly clear delivery history so reanalyzed videos may be sent again.",
+        help="Deprecated compatibility option; reanalysis resends by default.",
     )
     return parser.parse_args()
 
@@ -73,7 +73,7 @@ def main() -> int:
     if not args.yes:
         print("Existing raw, rejected, and event videos and analysis results will be deleted.")
         print("Blink authentication, .env, and Telegram connection settings will be preserved.")
-        if args.resend_telegram:
+        if not args.keep_telegram_history:
             print("Events detected again during reanalysis will be sent to Telegram again.")
         answer = input("Type yes to continue: ").strip().lower()
         if answer != "yes":
@@ -90,7 +90,7 @@ def main() -> int:
         connection.execute("DELETE FROM clips")
         connection.execute("DELETE FROM state WHERE key LIKE 'ai:moondream:%'")
         connection.execute("DELETE FROM state WHERE key LIKE 'ai:rfdetr:%'")
-        if args.resend_telegram:
+        if not args.keep_telegram_history:
             connection.execute("DELETE FROM state WHERE key LIKE 'telegram:%'")
         else:
             connection.execute(
@@ -127,10 +127,11 @@ def main() -> int:
     print(f"Complete: deleted {deleted} existing video files and analysis records.")
     print(f"Database backup: {backup}")
     print(f"The next run will scan the most recent {args.hours:g} hours.")
-    if args.resend_telegram:
-        print("Eligible events detected again will be sent to Telegram again.")
-    else:
+    if args.keep_telegram_history:
         print("Telegram delivery history was preserved; identical filenames will not be sent twice.")
+    else:
+        print("Telegram delivery history was cleared for this reanalysis.")
+        print("Each eligible filename may be sent once again, but not twice in the same run.")
     print("Start now with: bash scripts/run.sh")
     return 0
 
