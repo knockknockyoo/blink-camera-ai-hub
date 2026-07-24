@@ -159,7 +159,7 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `NATIVE_AI_URL` | empty | Native macOS AI endpoint used by Docker; the native installer sets it automatically |
 | `NATIVE_AI_BACKEND` | `moondream2` | Native detector (`moondream2` or `yolo`) |
 | `MOONDREAM_MAX_FRAMES` | `6` | Representative frames analyzed per video |
-| `NATIVE_AI_CONCURRENCY` | `2` | Maximum concurrent native GPU requests |
+| `NATIVE_AI_CONCURRENCY` | `1` | Maximum concurrent native GPU requests; use `1` on an 8 GB M1 |
 | `AI_DEVICE` | `mps` | PyTorch device used by the native service |
 
 `PERSON_MIN_AREA` and `PERSON_MIN_BOX_MOTION` reject small, static person false positives. `VEHICLE_MIN_BOX_MOTION` and `VEHICLE_MIN_SHARPNESS` reduce false alerts from parked vehicles and out-of-focus insects. If distant real subjects are missed, lower these values gradually and test again.

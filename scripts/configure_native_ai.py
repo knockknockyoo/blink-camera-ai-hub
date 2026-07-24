@@ -13,7 +13,7 @@ REQUIRED = {
     "NATIVE_AI_BACKEND": "moondream2",
     "MOONDREAM_MODEL_NAME": "vikhyatk/moondream2",
     "MOONDREAM_MAX_FRAMES": "6",
-    "NATIVE_AI_CONCURRENCY": "2",
+    "NATIVE_AI_CONCURRENCY": "1",
     "NATIVE_AI_PORT": "8790",
 }
 

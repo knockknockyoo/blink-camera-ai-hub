@@ -49,9 +49,10 @@ tail -f data/logs/native-ai.log
 
 The native service is managed by `launchd` with `RunAtLoad` and `KeepAlive`.
 It loads Moondream2 on `mps`, accepts only authenticated paths under `data/`,
-and processes up to two video requests concurrently by default. The computer
-still must remain awake; neither Docker nor `launchd` can run while macOS is
-asleep.
+and processes one GPU request at a time by default to fit an 8 GB M1. The
+backend still analyzes multiple videos concurrently and runs each video's YOLO
+work in parallel with its Moondream2 request. The computer must remain awake;
+neither Docker nor `launchd` can run while macOS is asleep.
 
 ## Stop and restart
 
