@@ -148,7 +148,7 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `BLINK_MAX_CLIPS_PER_SCAN` | `20` | Maximum clips processed per scan, newest first; `0` disables the limit |
 | `BLINK_DOWNLOAD_DELAY_SECONDS` | `5` | Pause between clip downloads to reduce Blink throttling |
 | `BLINK_BACKLOG_RETRY_SECONDS` | `15` | Delay before fetching the next batch when older clips remain |
-| `BLINK_SCAN_OVERLAP_SECONDS` | `900` | Previous time window rechecked on each scan for late Sync Module clips |
+| `BLINK_SCAN_OVERLAP_SECONDS` | `21600` | Previous six-hour window rechecked on each scan for late Sync Module clips |
 | `MERGE_WINDOW_SECONDS` | `120` | Time window for joining related clips |
 | `VIDEO_RETENTION_DAYS` | `90` | Retention period; `0` disables automatic deletion |
 | `MODEL_NAME` | `yolo11n.pt` | Ultralytics model name or local path |
