@@ -137,7 +137,6 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
             detections = [detections]
 
         per_frame: list[set[str]] = []
-        max_instances: Counter[str] = Counter()
         vehicle_sharpness: dict[str, float] = {}
         detection_boxes: dict[str, list[tuple[int, list[float]]]] = {}
         max_confidence = 0.0
@@ -189,13 +188,14 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
                     (frame_index, box)
                 )
                 max_confidence = max(max_confidence, confidence)
-            for label, count in Counter(frame_labels).items():
-                max_instances[label] = max(max_instances[label], count)
             per_frame.append(set(frame_labels))
 
         occurrences = Counter(label for labels in per_frame for label in labels)
         labels = {
-            label: max_instances[label]
+            # RF-DETR supplements recall. Low-threshold boxes are reliable for
+            # presence but can split one physical object into multiple boxes.
+            # Leave exact instance counts to the primary YOLO analyzer.
+            label: 1
             for label, count in occurrences.items()
             if label_is_supported(
                 label,
