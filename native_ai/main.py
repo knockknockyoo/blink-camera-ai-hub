@@ -24,7 +24,7 @@ SETTINGS = Settings()
 TOKEN = os.getenv("NATIVE_AI_TOKEN", "")
 BACKEND = os.getenv("NATIVE_AI_BACKEND", "rfdetr").strip().lower()
 DEVICE = os.getenv("AI_DEVICE", "mps").strip().lower()
-MAX_FRAMES = max(1, int(os.getenv("RFDETR_MAX_FRAMES", "8")))
+MAX_FRAMES = max(1, int(os.getenv("RFDETR_MAX_FRAMES", "16")))
 CONCURRENCY = max(1, int(os.getenv("NATIVE_AI_CONCURRENCY", "1")))
 MODEL_NAME = (
     os.getenv("RFDETR_MODEL_SIZE", "small")

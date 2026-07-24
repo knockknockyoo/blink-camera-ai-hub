@@ -12,7 +12,7 @@ REQUIRED = {
     "AI_DEVICE": "mps",
     "NATIVE_AI_BACKEND": "rfdetr",
     "RFDETR_MODEL_SIZE": "small",
-    "RFDETR_MAX_FRAMES": "8",
+    "RFDETR_MAX_FRAMES": "16",
     "NATIVE_AI_CONCURRENCY": "1",
     "NATIVE_AI_PORT": "8790",
 }

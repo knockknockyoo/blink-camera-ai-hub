@@ -60,7 +60,7 @@ class RFDETRVideoAnalyzer(VideoAnalyzer):
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
         source_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         duration = source_count / fps if fps else 0.0
-        target_count = max(1, self.max_frames or 8)
+        target_count = max(1, self.max_frames or 16)
         indexes = {
             round(index * max(0, source_count - 1) / max(1, target_count - 1))
             for index in range(min(target_count, max(1, source_count)))

@@ -108,7 +108,7 @@ Docker container submits only a relative path for a video already present in the
 shared `data/` directory; it does not upload the video over the internet.
 Requests are authenticated with a generated local token. Two fast YOLO workers
 analyze downloaded videos without waiting for the native queue. RF-DETR Small
-analyzes eight representative frames on Apple MPS, while the native service
+analyzes 16 representative frames on Apple MPS, while the native service
 limits GPU concurrency to avoid exhausting unified memory.
 
 ## Test with existing videos
@@ -159,7 +159,7 @@ The setup script copies `.env.example` to `.env`. The most important settings ar
 | `NATIVE_AI_URL` | empty | Native macOS AI endpoint used by Docker; the native installer sets it automatically |
 | `NATIVE_AI_BACKEND` | `rfdetr` | Native Apple MPS detector (`rfdetr` or `yolo`) |
 | `RFDETR_MODEL_SIZE` | `small` | RF-DETR variant; Small is the M1 accuracy/latency default |
-| `RFDETR_MAX_FRAMES` | `8` | Uniformly spaced frames analyzed per video |
+| `RFDETR_MAX_FRAMES` | `16` | Uniformly spaced frames analyzed per video |
 | `NATIVE_AI_CONCURRENCY` | `1` | Maximum concurrent native GPU requests; use `1` on an 8 GB M1 |
 | `AI_DEVICE` | `mps` | PyTorch device used by the native service |
 
