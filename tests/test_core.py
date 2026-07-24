@@ -413,6 +413,76 @@ class CoreTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_fast_rfdetr_updates_caption_after_slow_video_upload(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "raw" / "1" / "20260723_120000_race.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"video")
+                service = MonitorService(
+                    Settings(
+                        data_dir=root,
+                        video_retention_days=0,
+                        native_ai_url="",
+                        telegram_bot_token="token",
+                        telegram_chat_id="123",
+                    )
+                )
+
+                class Analyzer:
+                    def __init__(self, labels):
+                        self.labels = labels
+
+                    def analyze(self, _path, _captured_at):
+                        return {
+                            "duration": 4,
+                            "labels": self.labels,
+                            "score": 0.9,
+                            "motion_score": 0.1,
+                            "anomaly": False,
+                            "anomaly_reasons": [],
+                        }
+
+                sent = []
+                edited = []
+
+                class Telegram:
+                    configured = True
+
+                    async def send_event_message(self, event):
+                        sent.append(event)
+                        await asyncio.sleep(0.05)
+                        return 654
+
+                    async def edit_event_caption(self, message_id, event):
+                        edited.append((message_id, event))
+                        return True
+
+                service.telegram = Telegram()
+                await service._analyze_one(
+                    video,
+                    EnsembleVideoAnalyzer(
+                        Analyzer({"person": 1}),
+                        Analyzer({"person": 1}),
+                    ),
+                )
+                await asyncio.gather(*list(service._secondary_tasks))
+
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(
+                    sent[0]["model_votes"]["rfdetr"]["status"],
+                    "pending",
+                )
+                self.assertEqual(len(edited), 1)
+                self.assertEqual(edited[0][0], 654)
+                self.assertEqual(
+                    edited[0][1]["model_votes"]["rfdetr"]["status"],
+                    "positive",
+                )
+
+        asyncio.run(run())
+
     def test_same_filename_is_never_sent_twice(self):
         async def run():
             with tempfile.TemporaryDirectory() as directory:

@@ -599,34 +599,55 @@ class MonitorService:
         if not self.telegram.configured:
             return
         event = self._notification_event(clip)
-        event_key = self._telegram_key(event) if event is not None else None
-        message_value = None
-        if event is not None:
+        if event is None:
+            self.db.delete_state(f"telegram:clip-pending:{clip['id']}")
+            return
+
+        # Read delivery state only while holding the same lock used by the
+        # provisional YOLO sender. Otherwise RF-DETR can finish during the
+        # video upload, observe no message ID yet, and leave a permanent
+        # "pending" caption after the upload completes.
+        event_key = self._telegram_key(event)
+        file_key = self._telegram_file_key(event)
+        async with self._notification_lock:
             message_value = self.db.get_state(
                 self._telegram_file_message_key(event)
-            )
-        message_value = message_value or self.db.get_state(
-            f"telegram:clip-message:{clip['id']}"
-        )
-        if message_value and event is not None:
-            async with self._notification_lock:
+            ) or self.db.get_state(f"telegram:clip-message:{clip['id']}")
+            if message_value:
                 await self.telegram.edit_event_caption(
                     int(message_value),
                     event,
                 )
-            return
-        if event is not None and self.db.get_state(
-            self._telegram_file_key(event)
-        ):
-            return
-        if event_key and self.db.get_state(event_key):
-            return
-        pending_key = f"telegram:clip-pending:{clip['id']}"
-        if event is None:
-            self.db.delete_state(pending_key)
-            return
+                return
+            if self.db.get_state(file_key) or self.db.get_state(event_key):
+                return
+
+            message_id = await self._telegram_send_with_id(event)
+            if message_id is not None:
+                sent_at = datetime.now(timezone.utc).isoformat()
+                self.db.set_state(
+                    f"telegram:clip-sent:{clip['id']}",
+                    sent_at,
+                )
+                self.db.set_state(file_key, sent_at)
+                self.db.set_state(event_key, sent_at)
+                if message_id:
+                    self.db.set_state(
+                        f"telegram:clip-message:{clip['id']}",
+                        str(message_id),
+                    )
+                    self.db.set_state(
+                        self._telegram_file_message_key(event),
+                        str(message_id),
+                    )
+                LOGGER.info(
+                    "[Telegram] Final model result sent: file=%s message=%s",
+                    Path(clip["path"]).name,
+                    message_id,
+                )
+                return
+
         self._queue_clip_notification(clip)
-        await self._send_pending_notifications()
 
     async def _notification_loop(self) -> None:
         while self._running:
